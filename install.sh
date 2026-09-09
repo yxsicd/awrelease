@@ -55,6 +55,19 @@ sanitize_name() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_]/_/g; s/^_*//; s/_*$//; s/__*/_/g'
 }
 
+valid_enrollment_device_name() {
+  value="$1"
+  [ -n "$value" ] || return 1
+  [ "${#value}" -le 128 ] || return 1
+  case "$value" in
+    [A-Za-z0-9]* ) ;;
+    * ) return 1 ;;
+  esac
+  case "$value" in
+    *[!A-Za-z0-9._-]* ) return 1 ;;
+  esac
+}
+
 usage() {
   cat >&2 <<'USAGE'
 Usage: install.sh --enroll CLAIM_URL [--home PATH]
@@ -258,7 +271,8 @@ if [ -n "${AGENTWEB_ENROLL_URL:-}" ]; then
   [ "$manifest_kind" = "agentwebBootstrapManifest" ] || fail "claim did not return an AgentWeb bootstrap manifest"
   claim_device="$(json_value deviceName "$bootstrap_path" || true)"
   [ -n "$claim_device" ] || fail "bootstrap manifest has no deviceName"
-  if [ -n "${AGENTWEB_DEVICE_NAME:-}" ] && [ "$(sanitize_name "$AGENTWEB_DEVICE_NAME")" != "$(sanitize_name "$claim_device")" ]; then
+  valid_enrollment_device_name "$claim_device" || fail "bootstrap manifest has an invalid deviceName"
+  if [ -n "${AGENTWEB_DEVICE_NAME:-}" ] && [ "$AGENTWEB_DEVICE_NAME" != "$claim_device" ]; then
     fail "--device does not match the signed bootstrap manifest"
   fi
   AGENTWEB_DEVICE_NAME="$claim_device"
@@ -304,7 +318,11 @@ if [ -z "${AGENTWEB_DEVICE_NAME:-}" ]; then
     [ -n "$existing_device" ] && break
   done
 fi
-device_name="$(sanitize_name "${AGENTWEB_DEVICE_NAME:-${existing_device:-$default_device}}")"
+if [ -n "${AGENTWEB_ENROLL_URL:-}" ]; then
+  device_name="$AGENTWEB_DEVICE_NAME"
+else
+  device_name="$(sanitize_name "${AGENTWEB_DEVICE_NAME:-${existing_device:-$default_device}}")"
+fi
 [ -n "$device_name" ] || device_name="agentweb_node"
 
 log "AgentWeb install: channel=${channel} platform=${os}/${arch} artifact=${artifact_key}"
