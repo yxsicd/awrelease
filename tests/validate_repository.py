@@ -11,6 +11,7 @@ assert set(descriptor["transports"]) == {"http", "mcp", "websiteSkills"}
 assert descriptor["transports"]["mcp"]["compatibility"] == "unchanged"
 assert descriptor["releaseChannels"]["default"] == "prod"
 assert descriptor["releaseChannels"]["order"] == ["dev", "main", "prod"]
+assert descriptor["discovery"]["runtimeEnrollmentDiscoveryPath"] == "/setup/api/bootstrap-info"
 
 for relative in ("README.md", "SKILL.md", "service.json", "skills.json", "install.sh"):
     assert (root / relative).is_file(), relative
@@ -19,6 +20,16 @@ for entry in catalog["skills"]:
     assert skill.startswith("---\n"), entry["path"]
     assert "service-discovery-version: \"1\"" in skill, entry["path"]
     assert "service-manifest:" in skill, entry["path"]
+
+install_skill = (root / "install" / "SKILL.md").read_text()
+for required in (
+    "/setup/api/bootstrap-info",
+    "selfServicePolicyIds",
+    "x-agentweb-rgw-token",
+    "HTTP 201",
+    "oneLine.posix",
+):
+    assert required in install_skill, required
 
 source_installer = root.parent / "agentweb" / "agentgw" / "src" / "static" / "install.sh"
 if source_installer.is_file():

@@ -21,7 +21,13 @@ needs installation, deployment discovery, or the correct public interface.
 
 ## First install
 
-Obtain a single-use enrollment claim from the authorized target gateway, then:
+Read [Install and upgrade](./install/SKILL.md). Given an operator-approved
+gateway URL, it explains how to discover enrollment policies and ask that
+gateway for a single-use claim. A self-service policy needs no management
+credential; every other policy requires operator authorization.
+
+After the gateway returns `oneLine.posix`, execute that exact command. Its
+equivalent form is:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
@@ -29,9 +35,9 @@ curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
 ```
 
 The default channel is `prod`. The installer verifies the manifest-selected
-binary before replacing or starting anything. An enrollment claim, credentials,
-deployment host, and peer identity are authority supplied by the operator; this
-Skill cannot create or infer them.
+binary before replacing or starting anything. The Agent may request a claim
+from the approved gateway, but it cannot invent a gateway, device identity,
+registration policy, or management credential.
 
 ## Stop conditions
 

@@ -7,8 +7,10 @@ and install only checksum-verified release bytes.
 
 ## Install an enrolled AgentWeb node
 
-An authorized AgentWeb gateway first issues a single-use enrollment claim.
-Install the stable `prod` channel with:
+Given an operator-approved gateway, first read its public
+`/setup/api/bootstrap-info`. The linked [installation Skill](install/SKILL.md)
+explains self-service and management-authorized claim issuance. The gateway
+returns a single-use platform command; its POSIX form is:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
@@ -19,6 +21,11 @@ The installer detects Linux amd64/arm64 or macOS arm64, downloads the
 service-qualified `agentgw-prod.json` manifest, verifies the selected binary's
 SHA-256, writes the AgentWeb manager profile, starts it with systemd or launchd,
 and checks local `/build-info` readiness.
+
+The release repository contains no deployment token. A non-self-service policy
+requires the gateway's management credential in an HTTP header when creating
+the claim; the installer then handles the returned enrollment credentials
+without exposing them to the Agent.
 
 Use `--channel main` only for an operator-owned canary. Use `dev` only for a
 release-engineering canary. The immutable artifact set is built once and

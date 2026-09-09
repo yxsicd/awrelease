@@ -11,7 +11,9 @@
   "discovery": {
     "rootSkill": "SKILL.md",
     "catalog": "skills.json",
-    "installer": "install.sh"
+    "installer": "install.sh",
+    "runtimeEnrollmentDiscoveryPath": "/setup/api/bootstrap-info",
+    "runtimeClaimEndpointSource": "bootstrap-info.enrollment.claimEndpoint"
   },
   "releaseChannels": {
     "default": "prod",
