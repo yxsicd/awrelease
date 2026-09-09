@@ -1,0 +1,47 @@
+name: AgentWeb public release smoke
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published, edited]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: awrelease-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-and-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [main, prod]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate public onboarding contract
+        run: |
+          sh -n install.sh
+          sh install.sh --help
+          python3 tests/validate_repository.py
+      - name: Install released binaries and smoke three surfaces
+        run: |
+          mkdir -p "$RUNNER_TEMP/awrelease-smoke"
+          python3 scripts/release_smoke.py \
+            --channel "${{ matrix.channel }}" \
+            --output "$RUNNER_TEMP/awrelease-smoke/${{ matrix.channel }}.json"
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: awrelease-smoke-${{ matrix.channel }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/awrelease-smoke
+          if-no-files-found: warn
+          retention-days: 14

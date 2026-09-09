@@ -1,0 +1,12 @@
+{
+  "schema": "agentweb.website-skills.v1",
+  "service": "agentweb-release",
+  "root": "SKILL.md",
+  "skills": [
+    {"id": "agentweb-release", "path": "SKILL.md"},
+    {"id": "agentweb-install", "path": "install/SKILL.md"},
+    {"id": "agentweb-http", "path": "http/SKILL.md"},
+    {"id": "agentweb-mcp", "path": "mcp/SKILL.md"},
+    {"id": "agentweb-website-skills", "path": "website-skills/SKILL.md"}
+  ]
+}

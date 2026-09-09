@@ -1,0 +1,39 @@
+{
+  "schema": "agentweb.release-service.v1",
+  "profileVersion": "1.0",
+  "urlResolution": "document-relative",
+  "service": {
+    "id": "agentweb-release",
+    "product": "agentweb",
+    "sourceRepository": "https://github.com/yxsicd/agentweb",
+    "releaseRepository": "https://github.com/yxsicd/awrelease"
+  },
+  "discovery": {
+    "rootSkill": "SKILL.md",
+    "catalog": "skills.json",
+    "installer": "install.sh"
+  },
+  "releaseChannels": {
+    "default": "prod",
+    "order": ["dev", "main", "prod"],
+    "agentgwManifestTemplate": "https://github.com/yxsicd/awrelease/releases/download/{channel}/agentgw-{channel}.json",
+    "awmcpManifestTemplate": "https://github.com/yxsicd/awrelease/releases/download/{channel}/awmcp-{channel}.json"
+  },
+  "transports": {
+    "http": {
+      "runtimeDiscoveryPath": "/.well-known/agentweb",
+      "runtimeOpenApiPath": "/api/v1/openapi.json"
+    },
+    "mcp": {
+      "runtimeEndpoint": "deployment-advertised",
+      "transport": "streamable-http",
+      "implementation": "existing-awmcp",
+      "compatibility": "unchanged"
+    },
+    "websiteSkills": {
+      "root": "SKILL.md",
+      "catalog": "skills.json",
+      "authentication": "none"
+    }
+  }
+}
