@@ -21,23 +21,21 @@ needs installation, deployment discovery, or the correct public interface.
 
 ## First install
 
-Read [Install and upgrade](./install/SKILL.md). Given an operator-approved
-gateway URL, it explains how to discover enrollment policies and ask that
-gateway for a single-use claim. A self-service policy needs no management
-credential; every other policy requires operator authorization.
-
-After the gateway returns `oneLine.posix`, execute that exact command. Its
-equivalent form is:
+Read [Install and upgrade](./install/SKILL.md). The operator must supply the
+gateway. The installer uses Basic user `agentweb`, unified verify
+`agentwebadmin`, policy `personal-default`, and a production Ma/Mb/Mc profile.
+Run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
-  | sh -s -- --enroll '<claim-url>'
+  | sh -s -- --gateway https://gateway.example.com
 ```
 
 The default channel is `prod`. The installer verifies the manifest-selected
-binary before replacing or starting anything. The Agent may request a claim
-from the approved gateway, but it cannot invent a gateway, device identity,
-registration policy, or management credential.
+binary before replacing or starting anything. Use `--gateway`, `--device`,
+`--policy`, `--profile`, or `--basic` for an explicit deployment. The same
+verify is used for RGW HTTP, AWMCP, and Basic claim issuance. A legacy upgraded
+gateway may advertise `crc`; custom values must be supplied explicitly.
 
 ## Stop conditions
 

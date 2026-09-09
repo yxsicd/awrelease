@@ -71,11 +71,16 @@ valid_enrollment_device_name() {
 usage() {
   cat >&2 <<'USAGE'
 Usage: install.sh --enroll CLAIM_URL [--home PATH]
+       install.sh [--gateway URL] [--device NAME] [--policy ID] [--profile production|dv] [--basic VERIFY]
        install.sh --device NAME --remote-gws URLS [--channel dev|main|prod] [--home PATH]
 
 Environment variables:
   AGENTWEB_DEVICE_NAME   Stable topology device name. Prefer this over hostname.
   AGENTWEB_ENROLL_URL    Single-use manifest claim issued by an authorized gateway.
+  AGENTWEB_SETUP_GATEWAY Required claim issuer origin when --gateway is omitted.
+  AGENTWEB_SETUP_POLICY  Registration policy, default personal-default.
+  AGENTWEB_SETUP_PROFILE Manager profile, default production.
+  AGENTWEB_VERIFY         Shared RGW/MCP/Basic verify, default agentwebadmin.
   AGENTWEB_CHANNEL       Release channel, default prod.
   AGENTWEB_HOME          Install root, default ${HOME}/.agentweb.
   AGENTWEB_REMOTE_GWS    Explicit break-glass upstream URLs; never supplied by the public package.
@@ -93,6 +98,26 @@ while [ "$#" -gt 0 ]; do
     --enroll)
       [ "$#" -ge 2 ] || fail "--enroll requires a value"
       AGENTWEB_ENROLL_URL="$2"
+      shift 2
+      ;;
+    --gateway)
+      [ "$#" -ge 2 ] || fail "--gateway requires a value"
+      AGENTWEB_SETUP_GATEWAY="$2"
+      shift 2
+      ;;
+    --policy)
+      [ "$#" -ge 2 ] || fail "--policy requires a value"
+      AGENTWEB_SETUP_POLICY="$2"
+      shift 2
+      ;;
+    --profile)
+      [ "$#" -ge 2 ] || fail "--profile requires a value"
+      AGENTWEB_SETUP_PROFILE="$2"
+      shift 2
+      ;;
+    --basic)
+      [ "$#" -ge 2 ] || fail "--basic requires a value"
+      AGENTWEB_VERIFY="$2"
       shift 2
       ;;
     --channel)
@@ -256,6 +281,77 @@ bootstrap_path="${tmp_dir}/bootstrap.$$.json"
 
 mkdir -p "$bin_dir" "$env_dir" "$state_dir" "$log_dir" "$tmp_dir"
 
+default_device="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo agentweb-node)"
+
+if [ -z "${AGENTWEB_ENROLL_URL:-}" ] && [ -z "${AGENTWEB_REMOTE_GWS:-}" ]; then
+  need_cmd curl
+  setup_gateway="${AGENTWEB_SETUP_GATEWAY:-}"
+  [ -n "$setup_gateway" ] || fail "--gateway or AGENTWEB_SETUP_GATEWAY is required"
+  setup_gateway="${setup_gateway%/}"
+  case "$setup_gateway" in
+    http://*|https://*) ;;
+    *) fail "--gateway must be an http:// or https:// origin" ;;
+  esac
+  case "$setup_gateway" in
+    *[[:space:]\"\']*) fail "--gateway must not contain whitespace or quotes" ;;
+  esac
+  setup_policy="${AGENTWEB_SETUP_POLICY:-personal-default}"
+  case "$setup_policy" in
+    ""|*[!A-Za-z0-9._-]*) fail "--policy contains unsupported characters" ;;
+  esac
+  setup_profile="${AGENTWEB_SETUP_PROFILE:-production}"
+  [ "$setup_profile" = "production" ] || [ "$setup_profile" = "dv" ] || fail "--profile must be production or dv"
+  requested_device="${AGENTWEB_DEVICE_NAME:-$(sanitize_name "$default_device")}"
+  valid_enrollment_device_name "$requested_device" || fail "--device contains unsupported enrollment identity characters"
+  AGENTWEB_DEVICE_NAME="$requested_device"
+
+  setup_info="${tmp_dir}/setup-info.$$.json"
+  claim_request="${tmp_dir}/claim-request.$$.json"
+  claim_response="${tmp_dir}/claim-response.$$.json"
+  basic_config="${tmp_dir}/claim-basic.$$.curl"
+  download "${setup_gateway}/setup/api/bootstrap-info" "$setup_info"
+  [ "$(json_value enrollment.configured "$setup_info" || true)" = "true" ] || fail "gateway enrollment is not configured"
+  claim_endpoint="$(json_value enrollment.claimEndpoint "$setup_info" || true)"
+  case "$claim_endpoint" in
+    /*) ;;
+    *) fail "gateway bootstrap has no origin-relative claimEndpoint" ;;
+  esac
+  setup_policies="$(json_array_csv enrollment.registrationPolicies "$setup_info" || true)"
+  case ",${setup_policies}," in
+    *,"${setup_policy}",*) ;;
+    *) fail "gateway does not advertise registration policy ${setup_policy}" ;;
+  esac
+  setup_basic_username="$(json_value enrollment.claimAuthentication.username "$setup_info" || true)"
+  [ "$setup_basic_username" = "agentweb" ] || fail "gateway does not advertise the supported setup Basic username"
+  setup_basic_verify="${AGENTWEB_VERIFY:-}"
+  if [ -z "$setup_basic_verify" ]; then
+    setup_basic_verify="$(json_value enrollment.claimAuthentication.defaultVerify "$setup_info" || true)"
+  fi
+  [ -n "$setup_basic_verify" ] || fail "gateway uses a custom verify; provide it with --basic"
+  case "$setup_basic_verify" in
+    ""|*[!A-Za-z0-9._-]*) fail "--basic contains unsupported characters" ;;
+  esac
+  [ "${#setup_basic_verify}" -le 128 ] || fail "--basic is too long"
+
+  printf '{"deviceName":"%s","registrationPolicyId":"%s","profile":"%s"}\n' \
+    "$requested_device" "$setup_policy" "$setup_profile" >"$claim_request"
+  printf 'user = "%s:%s"\n' "$setup_basic_username" "$setup_basic_verify" >"$basic_config"
+  log "AgentWeb enrollment: requesting a one-time claim from ${setup_gateway}"
+  claim_status="$(curl --config "$basic_config" -sS -o "$claim_response" -w '%{http_code}' \
+    -H 'content-type: application/json' --data-binary "@$claim_request" \
+    "${setup_gateway}${claim_endpoint}")"
+  rm -f "$basic_config" "$claim_request"
+  setup_basic_verify=""
+  [ "$claim_status" = "201" ] || {
+    rm -f "$claim_response" "$setup_info"
+    fail "claim request failed with HTTP ${claim_status}; provide the configured value with --basic"
+  }
+  [ "$(json_value ok "$claim_response" || true)" = "true" ] || fail "gateway rejected the claim request"
+  AGENTWEB_ENROLL_URL="$(json_value claimUrl "$claim_response" || true)"
+  rm -f "$claim_response" "$setup_info"
+  [ -n "$AGENTWEB_ENROLL_URL" ] || fail "gateway claim response has no claimUrl"
+fi
+
 enrollment_token=""
 node_token_endpoint=""
 upstream_transport="auto"
@@ -304,7 +400,6 @@ else
 fi
 [ -n "$manifest_url" ] || fail "bootstrap manifest has no release manifest URL"
 
-default_device="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo agentweb-node)"
 existing_device=""
 if [ -z "${AGENTWEB_DEVICE_NAME:-}" ]; then
   for existing_env in \

@@ -5,16 +5,15 @@ This repository is the public install and binary release authority for
 single GitHub URL, read [`SKILL.md`](SKILL.md), select the required capability,
 and install only checksum-verified release bytes.
 
-## Install an enrolled AgentWeb node
+## Install an AgentWeb node
 
-Given an operator-approved gateway, first read its public
-`/setup/api/bootstrap-info`. The linked [installation Skill](install/SKILL.md)
-explains self-service and management-authorized claim issuance. The gateway
-returns a single-use platform command; its POSIX form is:
+The gateway must be supplied by the deployment operator. New deployments use
+the unified verify `agentwebadmin`; the fixed Basic username is `agentweb`.
+The installer requests and consumes its own single-use enrollment claim:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
-  | sh -s -- --enroll 'https://<gateway>/setup/api/enrollment/manifest/<claim>'
+  | sh -s -- --gateway https://gateway.example.com
 ```
 
 The installer detects Linux amd64/arm64 or macOS arm64, downloads the
@@ -22,10 +21,10 @@ service-qualified `agentgw-prod.json` manifest, verifies the selected binary's
 SHA-256, writes the AgentWeb manager profile, starts it with systemd or launchd,
 and checks local `/build-info` readiness.
 
-The release repository contains no deployment token. A non-self-service policy
-requires the gateway's management credential in an HTTP header when creating
-the claim; the installer then handles the returned enrollment credentials
-without exposing them to the Agent.
+Use `--gateway`, `--device`, `--policy`, `--profile`, or `--basic` when the
+deployment differs. The verify is one value shared by RGW HTTP, AWMCP tool
+calls, and Basic claim issuance. An upgraded gateway may advertise and retain
+the historical `crc` default; explicit existing configuration always wins.
 
 Use `--channel main` only for an operator-owned canary. Use `dev` only for a
 release-engineering canary. The immutable artifact set is built once and
@@ -64,11 +63,11 @@ https://github.com/yxsicd/awrelease/releases/download/prod/awmcp-prod.json
 ## Public release smoke
 
 GitHub Actions runs the public `main` and `prod` binaries without private source
-or credentials. It verifies manifests and hashes, starts AgentGW and AWMCP,
-checks AgentGW HTTP discovery, performs read-only MCP `initialize` and
-`tools/list`, follows the release-repository Skills, and requires the released
-AgentGW's runtime Website Skills and three-surface descriptor. It never invokes
-a business MCP tool.
+or credentials. It verifies manifests and hashes, starts RGW plus same-host
+Ma/Mb/Mc, routes status, command execution, file round trips, and manager
+inspection through RGW to every exact peer, then checks AWMCP read-only
+`initialize`/`tools/list` and both Website Skills surfaces. It never invokes an
+MCP business tool.
 
 Run the same black-box check locally on Linux amd64:
 

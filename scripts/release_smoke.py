@@ -14,6 +14,7 @@ import pathlib
 import platform
 import socket
 import subprocess
+import shutil
 import tempfile
 import threading
 import time
@@ -44,8 +45,8 @@ def request(url: str, *, payload: dict | None = None, headers: dict | None = Non
         return error.code, dict(error.headers), error.read()
 
 
-def get_json(url: str) -> dict:
-    status, _, body = request(url)
+def get_json(url: str, *, headers: dict | None = None) -> dict:
+    status, _, body = request(url, headers=headers)
     if status != 200:
         raise RuntimeError(f"GET {url} returned HTTP {status}: {body[:300]!r}")
     return json.loads(body)
@@ -85,6 +86,38 @@ def wait_json(url: str, process: subprocess.Popen, timeout: float = 20) -> dict:
             last = str(error)
             time.sleep(0.2)
     raise RuntimeError(f"timed out waiting for {url}: {last}")
+
+
+def wait_peers(url: str, expected: set[str], headers: dict, processes: list[subprocess.Popen], timeout: float = 20) -> dict:
+    deadline = time.monotonic() + timeout
+    last = set()
+    while time.monotonic() < deadline:
+        exited = [process.returncode for process in processes if process.poll() is not None]
+        if exited:
+            raise RuntimeError(f"Mabc exited before registration: {exited}")
+        try:
+            peers = get_json(url, headers=headers)
+            last = {peer.get("id") for peer in peers.get("peers", [])}
+            if expected <= last:
+                return peers
+        except Exception:
+            pass
+        time.sleep(0.2)
+    raise RuntimeError(f"timed out waiting for Mabc peers: expected={sorted(expected)} visible={sorted(last)}")
+
+
+def routed_command(base: str, verify: str, peer: str, name: str, payload: dict) -> dict:
+    status, _, body = request(
+        urllib.parse.urljoin(base, "api/cmd"),
+        payload={"to": peer, "name": name, "payload": payload, "timeoutMs": 15000},
+        headers={"Content-Type": "application/json", "x-agentweb-rgw-token": verify},
+    )
+    if status != 200:
+        raise RuntimeError(f"{name} via RGW returned HTTP {status}: {body[:500]!r}")
+    value = json.loads(body)
+    if value.get("ok") is not True or value.get("targetPeerId") != peer or value.get("routeDecision") != "peer_direct":
+        raise RuntimeError(f"{name} did not use exact direct peer {peer}: {value}")
+    return value.get("result", {})
 
 
 def decode_mcp(headers: dict, body: bytes) -> dict:
@@ -212,12 +245,10 @@ def main() -> int:
             if manifest.get("channel") != args.channel or manifest.get("gitDirty") is not False:
                 raise RuntimeError(f"invalid {service} channel manifest identity")
             artifact = manifest["artifacts"]["linux-x64-musl"]
-            binary = (
-                args.asset_cache / artifact["filename"]
-                if args.asset_cache
-                else temp_path / artifact["filename"]
-            )
-            if not args.asset_cache:
+            binary = temp_path / artifact["filename"]
+            if args.asset_cache:
+                shutil.copy2(args.asset_cache / artifact["filename"], binary)
+            else:
                 download(artifact.get("downloadUrl") or artifact["url"], binary)
             verify_artifact(manifest, "linux-x64-musl", binary)
             binary.chmod(0o755)
@@ -225,14 +256,23 @@ def main() -> int:
             binaries[service] = binary
 
         gateway_port, mcp_port = free_port(), free_port()
+        verify = "agentwebadmin"
+        role_ids = {
+            "ma": "lgw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "mb": "lgw_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mc": "lgw_cccccccccccccccccccccccccccccccc",
+        }
         gateway_log = (temp_path / "agentgw.log").open("wb")
         mcp_log = (temp_path / "awmcp.log").open("wb")
+        manager_logs = []
+        managers = []
         gateway = mcp = None
         try:
             gateway_env = os.environ.copy()
             gateway_env.update({
                 "AGENTGW_MODE": "remote",
                 "AGENTGW_BIND": f"127.0.0.1:{gateway_port}",
+                "AGENTWEB_VERIFY": verify,
                 "AGENTWEB_PUBLIC_URL": f"http://127.0.0.1:{gateway_port}",
                 "AGENTWEB_PUBLIC_MCP_URL": f"http://127.0.0.1:{mcp_port}/mcp",
             })
@@ -243,15 +283,90 @@ def main() -> int:
             gateway_health = wait_json(f"http://127.0.0.1:{gateway_port}/health", gateway)
             build_info = get_json(f"http://127.0.0.1:{gateway_port}/build-info")
             discovery = get_json(f"http://127.0.0.1:{gateway_port}/.well-known/agentweb")
-            get_json(f"http://127.0.0.1:{gateway_port}/api/v1/openapi.json")
+            auth_headers = {"x-agentweb-rgw-token": verify}
+            get_json(f"http://127.0.0.1:{gateway_port}/api/v1/openapi.json", headers=auth_headers)
             if gateway_health.get("service") != "agentgw" or build_info["build"]["gitDirty"]:
                 raise RuntimeError("released AgentGW identity is not clean")
+
+            for role, node_id in role_ids.items():
+                role_dir = temp_path / role
+                role_dir.mkdir()
+                manager_log = (temp_path / f"agentgw-{role}.log").open("wb")
+                manager_logs.append(manager_log)
+                manager_env = os.environ.copy()
+                manager_env.update({
+                    "AGENTGW_MODE": "manager",
+                    "AGENTGW_LISTEN": "none",
+                    "AGENTGW_BIND": "127.0.0.1:17888",
+                    "AGENTGW_NODE_ID": node_id,
+                    "AGENTGW_DEVICE_ID": "dev_awrelease_smoke",
+                    "AGENTGW_NODE_NAME": f"awrelease-smoke-{role}",
+                    "AGENTGW_DEVICE_NAME": "awrelease-smoke",
+                    "AGENTGW_MANAGER_ROLE": role,
+                    "AGENTGW_REMOTE_GWS": f"ws://127.0.0.1:{gateway_port}/ws?role=upstream",
+                    "AGENTGW_UPSTREAM_MODE": "all",
+                    "AGENTGW_CDP_HTTP": "http://127.0.0.1:9",
+                    "AGENTGW_CDP_HEARTBEAT_MS": "0",
+                    "AGENTGW_MANAGER_DIR": str(role_dir / "manager"),
+                    "AGENTGW_MANAGER_CHILD_ENV_FILES": "",
+                    "AGENTGW_DIST_DIR": str(role_dir / "dist"),
+                })
+                managers.append(subprocess.Popen(
+                    [str(binaries["agentgw"])], env=manager_env,
+                    stdout=manager_log, stderr=subprocess.STDOUT,
+                ))
+
+            wait_peers(
+                f"http://127.0.0.1:{gateway_port}/api/peers",
+                set(role_ids.values()), auth_headers, managers,
+            )
+            routed_checks = 0
+            for role, peer in role_ids.items():
+                status = routed_command(
+                    f"http://127.0.0.1:{gateway_port}/", verify, peer, "admin.status", {}
+                )
+                if status.get("ok") is not True:
+                    raise RuntimeError(f"{role} admin.status failed: {status}")
+                routed_checks += 1
+                marker = f"AWRELEASE_{args.channel}_{role}"
+                executed = routed_command(
+                    f"http://127.0.0.1:{gateway_port}/", verify, peer,
+                    "admin.system.exec",
+                    {"command": "/bin/sh", "args": ["-c", f"printf %s {marker}"], "sync": True, "timeout": 5},
+                )
+                record = executed.get("record", {})
+                if record.get("exitCode") != 0 or record.get("stdout") != marker:
+                    raise RuntimeError(f"{role} routed exec failed: {executed}")
+                routed_checks += 1
+                test_file = str(temp_path / f"{role}-roundtrip.txt")
+                written = routed_command(
+                    f"http://127.0.0.1:{gateway_port}/", verify, peer,
+                    "admin.fs.write", {"path": test_file, "content": marker},
+                )
+                if written.get("ok") is not True:
+                    raise RuntimeError(f"{role} routed file write failed: {written}")
+                routed_checks += 1
+                read_back = routed_command(
+                    f"http://127.0.0.1:{gateway_port}/", verify, peer,
+                    "admin.fs.read", {"path": test_file},
+                )
+                if read_back.get("ok") is not True or read_back.get("content") != marker:
+                    raise RuntimeError(f"{role} routed file read failed: {read_back}")
+                routed_checks += 1
+                children = routed_command(
+                    f"http://127.0.0.1:{gateway_port}/", verify, peer,
+                    "manager.child.list", {},
+                )
+                if children.get("ok") is not True or children.get("count") != 0:
+                    raise RuntimeError(f"{role} manager child list failed: {children}")
+                routed_checks += 1
 
             mcp_env = os.environ.copy()
             mcp_env.update({
                 "AWMCP_BIND": f"127.0.0.1:{mcp_port}",
                 "AWMCP_RGWS": f"http://127.0.0.1:{gateway_port}",
                 "AWMCP_PUBLIC_GATEWAYS": "",
+                "AGENTWEB_VERIFY": verify,
                 "AWMCP_PLAYWRIGHT_ENABLED": "false",
                 "AWMCP_SKILL_REPO_DIR": str(temp_path / "skills"),
             })
@@ -291,6 +406,9 @@ def main() -> int:
                 "awmcpGitSha": manifests["awmcp"]["gitSha"],
                 "runtimeMcpAdvertised": discovery["interfaces"].get("mcp"),
                 "runtimeWebsiteSkillsVerified": args.require_runtime_website_skills,
+                "mabcPeers": role_ids,
+                "mabcRoutedCommandCount": routed_checks,
+                "mabcFileRoundTrips": len(role_ids),
             }
             output = pathlib.Path(args.output)
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -298,8 +416,12 @@ def main() -> int:
             print(json.dumps(report, indent=2, sort_keys=True))
         finally:
             stop(mcp)
+            for manager in managers:
+                stop(manager)
             stop(gateway)
             mcp_log.close()
+            for manager_log in manager_logs:
+                manager_log.close()
             gateway_log.close()
     return 0
 
