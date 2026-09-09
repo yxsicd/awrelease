@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate public onboarding contract
         run: |
           sh -n install.sh
@@ -39,7 +39,7 @@ jobs:
             --output "$RUNNER_TEMP/awrelease-smoke/${{ matrix.channel }}.json"
       - name: Upload smoke evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: awrelease-smoke-${{ matrix.channel }}-${{ github.run_id }}
           path: ${{ runner.temp }}/awrelease-smoke
