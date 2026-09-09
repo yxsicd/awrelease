@@ -36,6 +36,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/awrelease-smoke"
           python3 scripts/release_smoke.py \
             --channel "${{ matrix.channel }}" \
+            --require-runtime-website-skills \
             --output "$RUNNER_TEMP/awrelease-smoke/${{ matrix.channel }}.json"
       - name: Upload smoke evidence
         if: always()

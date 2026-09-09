@@ -24,4 +24,8 @@ source_installer = root.parent / "agentweb" / "agentgw" / "src" / "static" / "in
 if source_installer.is_file():
     assert (root / "install.sh").read_bytes() == source_installer.read_bytes(), "installer drift"
 
+workflow = (root / ".github" / "workflows" / "release-smoke.yml").read_text()
+assert "--require-runtime-website-skills" in workflow
+assert "matrix:\n        channel: [main, prod]" in workflow
+
 print("OK awrelease repository contract")

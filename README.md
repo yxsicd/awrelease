@@ -59,8 +59,9 @@ https://github.com/yxsicd/awrelease/releases/download/prod/awmcp-prod.json
 GitHub Actions runs the public `main` and `prod` binaries without private source
 or credentials. It verifies manifests and hashes, starts AgentGW and AWMCP,
 checks AgentGW HTTP discovery, performs read-only MCP `initialize` and
-`tools/list`, and follows Website Skills discovery. It never invokes a business
-MCP tool.
+`tools/list`, follows the release-repository Skills, and requires the released
+AgentGW's runtime Website Skills and three-surface descriptor. It never invokes
+a business MCP tool.
 
 Run the same black-box check locally on Linux amd64:
 

@@ -153,6 +153,23 @@ def smoke_website_skills(root: pathlib.Path) -> None:
                 raise RuntimeError(f"Website Skill is unavailable: {item['path']}")
 
 
+def smoke_runtime_website_skills(base: str, discovery: dict) -> None:
+    descriptor = get_json(urllib.parse.urljoin(base, "service.json"))
+    catalog = get_json(urllib.parse.urljoin(base, descriptor["discovery"]["catalog"]))
+    if descriptor.get("schema") != "agentweb.service-interfaces.v1":
+        raise RuntimeError("released AgentGW has an unexpected service descriptor")
+    if set(descriptor.get("transports", {})) != {"http", "mcp", "websiteSkills"}:
+        raise RuntimeError("released AgentGW does not expose three surfaces")
+    if descriptor["transports"]["mcp"].get("compatibility") != "unchanged":
+        raise RuntimeError("released AgentGW changed the declared MCP compatibility boundary")
+    if discovery.get("interfaces", {}).get("websiteSkills") != urllib.parse.urljoin(base, "SKILL.md"):
+        raise RuntimeError("AgentGW discovery does not advertise its root Website Skill")
+    for item in catalog.get("skills", []):
+        status, _, body = request(urllib.parse.urljoin(base, item["path"]))
+        if status != 200 or not body.startswith(b"---\n"):
+            raise RuntimeError(f"runtime Website Skill is unavailable: {item['path']}")
+
+
 def stop(process: subprocess.Popen | None) -> None:
     if process is None or process.poll() is not None:
         return
@@ -169,6 +186,12 @@ def main() -> int:
     parser.add_argument("--channel", choices=("dev", "main", "prod"), default="prod")
     parser.add_argument("--repository", default="yxsicd/awrelease")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--require-runtime-website-skills", action="store_true")
+    parser.add_argument(
+        "--asset-cache",
+        type=pathlib.Path,
+        help="Use pre-fetched public manifests and binaries from this directory",
+    )
     args = parser.parse_args()
 
     if platform.system() != "Linux" or platform.machine().lower() not in {"x86_64", "amd64"}:
@@ -181,12 +204,21 @@ def main() -> int:
         manifests = {}
         binaries = {}
         for service in ("agentgw", "awmcp"):
-            manifest = get_json(f"{base}/{service}-{args.channel}.json")
+            manifest_name = f"{service}-{args.channel}.json"
+            if args.asset_cache:
+                manifest = json.loads((args.asset_cache / manifest_name).read_text())
+            else:
+                manifest = get_json(f"{base}/{manifest_name}")
             if manifest.get("channel") != args.channel or manifest.get("gitDirty") is not False:
                 raise RuntimeError(f"invalid {service} channel manifest identity")
             artifact = manifest["artifacts"]["linux-x64-musl"]
-            binary = temp_path / artifact["filename"]
-            download(artifact.get("downloadUrl") or artifact["url"], binary)
+            binary = (
+                args.asset_cache / artifact["filename"]
+                if args.asset_cache
+                else temp_path / artifact["filename"]
+            )
+            if not args.asset_cache:
+                download(artifact.get("downloadUrl") or artifact["url"], binary)
             verify_artifact(manifest, "linux-x64-musl", binary)
             binary.chmod(0o755)
             manifests[service] = manifest
@@ -244,6 +276,10 @@ def main() -> int:
                 raise RuntimeError("AWMCP negotiated an unexpected protocol version")
 
             smoke_website_skills(root)
+            if args.require_runtime_website_skills:
+                smoke_runtime_website_skills(
+                    f"http://127.0.0.1:{gateway_port}/", discovery
+                )
             report = {
                 "schema": "agentweb.release-smoke.v1",
                 "ok": True,
@@ -254,6 +290,7 @@ def main() -> int:
                 "agentgwGitSha": manifests["agentgw"]["gitSha"],
                 "awmcpGitSha": manifests["awmcp"]["gitSha"],
                 "runtimeMcpAdvertised": discovery["interfaces"].get("mcp"),
+                "runtimeWebsiteSkillsVerified": args.require_runtime_website_skills,
             }
             output = pathlib.Path(args.output)
             output.parent.mkdir(parents=True, exist_ok=True)
