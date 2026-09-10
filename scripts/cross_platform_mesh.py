@@ -338,7 +338,7 @@ def wait_for_local_mabc(base: str, platform_name: str, timeout: int = 300) -> li
         if len(selected) == 3:
             return selected
         time.sleep(2)
-    raise RuntimeError(f"host RGW did not see three managers plus three LGWs: {selected}")
+    raise RuntimeError(f"host RGW did not see the three Mabc manager peers: {selected}")
 
 
 def nested_mabc(base: str) -> tuple[list[dict], list[dict]]:
@@ -427,28 +427,42 @@ def client_test(endpoints_root: pathlib.Path, edge_state: pathlib.Path,
         if status.get("ok") is not True:
             raise RuntimeError(f"local status failed for {peer['id']}")
         checks += 1
-    checks += verify_exec_and_file(edge["localGateway"], local[0],
-                                   f"AWLOCAL_{source_platform}_{os.environ.get('GITHUB_RUN_ID', 'local')}".replace("-", "_"),
-                                   "peer_direct")
+        checks += verify_exec_and_file(
+            edge["localGateway"], peer,
+            f"AWLOCAL_{source_platform}_{peer['id'][-4:]}_{os.environ.get('GITHUB_RUN_ID', 'local')}".replace("-", "_"),
+            "peer_direct",
+        )
     central_counts = {}
+    target_platform_counts = {}
+    checked_peer_ids = set()
     for endpoint in bundle["centralGateways"]:
         hosts, peers = wait_for_nested_mabc(endpoint["url"], 12)
         central_counts[endpoint["id"]] = {"hostRgws": len(hosts), "mabc": len(peers)}
-        own = [peer for peer in peers if peer_platform(peer) == source_platform]
-        if len(own) != 3:
-            raise RuntimeError(f"{endpoint['id']} did not see this host's three Mabc LGWs")
-        for peer in own:
+        counts = {platform_name: 0 for platform_name in PLATFORMS}
+        for peer in peers:
+            target = peer_platform(peer)
+            if target is None:
+                raise RuntimeError(f"{endpoint['id']} exposed an unclassified Mabc peer: {peer}")
+            counts[target] += 1
+            checked_peer_ids.add(peer["id"])
             status = route(endpoint["url"], peer["id"], "admin.status", {}, "upstream_local_peer")
             if status.get("ok") is not True:
                 raise RuntimeError(f"central status failed for {peer['id']}")
             checks += 1
-        checks += verify_exec_and_file(endpoint["url"], own[0],
-                                       f"AWCENTRAL_{endpoint['id']}_{source_platform}_{os.environ.get('GITHUB_RUN_ID', 'local')}".replace("-", "_"),
-                                       "upstream_local_peer")
+            checks += verify_exec_and_file(
+                endpoint["url"], peer,
+                f"AWCENTRAL_{endpoint['id']}_{source_platform}_{target}_{peer['id'][-4:]}_{os.environ.get('GITHUB_RUN_ID', 'local')}".replace("-", "_"),
+                "upstream_local_peer",
+            )
+        if set(counts.values()) != {3}:
+            raise RuntimeError(f"{endpoint['id']} Mabc platform counts are incomplete: {counts}")
+        target_platform_counts[endpoint["id"]] = counts
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps({"ok": True, "sourcePlatform": source_platform,
                                   "separateHostRgwPid": edge["pid"], "localMabcCount": len(local),
                                   "centralCounts": central_counts, "routedCheckCount": checks,
+                                  "checkedPeerCount": len(checked_peer_ids),
+                                  "targetPlatformCounts": target_platform_counts,
                                   "routeDecisions": ["peer_direct", "upstream_local_peer"]}, indent=2) + "\n")
     print(output.read_text())
 
@@ -469,8 +483,11 @@ def gateway_failover_test(state_dir: pathlib.Path, endpoints_path: pathlib.Path,
         if status.get("ok") is not True:
             raise RuntimeError(f"survivor status failed for {peer['id']}")
         checks += 1
-    checks += verify_exec_and_file(survivor["url"], peers[0],
-                                   f"AWFAILOVER_{os.environ.get('GITHUB_RUN_ID', 'local')}", "upstream_local_peer")
+        checks += verify_exec_and_file(
+            survivor["url"], peer,
+            f"AWFAILOVER_{peer_platform(peer)}_{peer['id'][-4:]}_{os.environ.get('GITHUB_RUN_ID', 'local')}".replace("-", "_"),
+            "upstream_local_peer",
+        )
     directory = state_dir / failed["id"]
     env = json.loads((directory / "gateway-env.json").read_text(encoding="utf-8"))
     process = start_detached([runtime["binary"]], env, directory / "agentgw.log")
@@ -489,6 +506,7 @@ def gateway_failover_test(state_dir: pathlib.Path, endpoints_path: pathlib.Path,
                                   "mabcCountDuringFailure": len(peers),
                                   "recoveredHostRgwCount": len(recovered_hosts),
                                   "recoveredMabcCount": len(recovered_peers),
+                                  "failoverExecFilePeerCount": len(peers),
                                   "routedCheckCount": checks,
                                   "routeDecision": "upstream_local_peer"}, indent=2) + "\n")
     print(output.read_text())

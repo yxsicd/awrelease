@@ -33,13 +33,37 @@ EXPECTED_TOOLS = {
     "skill_run_write",
     "skill_run_publish",
 }
+EXPECTED_PUBLIC_OPERATIONS = {
+    "discoverAgentWeb",
+    "getApiIndex",
+    "getGatewayCapabilities",
+    "getLiveTopology",
+    "executeCommand",
+    "downloadPeerFile",
+    "uploadPeerFile",
+    "downloadPublication",
+    "viewPublicationAsset",
+}
 
 
-def request(url: str, *, payload: dict | None = None, headers: dict | None = None):
-    data = None if payload is None else json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, headers=headers or {})
+def request(
+    url: str,
+    *,
+    payload: dict | None = None,
+    data: bytes | None = None,
+    headers: dict | None = None,
+    method: str | None = None,
+    timeout: float = 20,
+):
+    if payload is not None and data is not None:
+        raise ValueError("payload and data are mutually exclusive")
+    body = data if payload is None else json.dumps(payload).encode()
+    request_headers = dict(headers or {})
+    if payload is not None:
+        request_headers.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(url, data=body, headers=request_headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=20) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.status, dict(response.headers), response.read()
     except urllib.error.HTTPError as error:
         return error.code, dict(error.headers), error.read()
@@ -49,6 +73,30 @@ def get_json(url: str, *, headers: dict | None = None) -> dict:
     status, _, body = request(url, headers=headers)
     if status != 200:
         raise RuntimeError(f"GET {url} returned HTTP {status}: {body[:300]!r}")
+    return json.loads(body)
+
+
+def header(headers: dict, name: str) -> str | None:
+    return next((value for key, value in headers.items() if key.lower() == name.lower()), None)
+
+
+def expect_json_status(
+    url: str,
+    expected_status: int,
+    *,
+    payload: dict | None = None,
+    data: bytes | None = None,
+    headers: dict | None = None,
+    method: str | None = None,
+) -> dict:
+    status, _, body = request(
+        url, payload=payload, data=data, headers=headers, method=method
+    )
+    if status != expected_status:
+        raise RuntimeError(
+            f"{method or ('POST' if payload is not None or data is not None else 'GET')} "
+            f"{url} returned HTTP {status}, expected {expected_status}: {body[:500]!r}"
+        )
     return json.loads(body)
 
 
@@ -120,6 +168,117 @@ def routed_command(base: str, verify: str, peer: str, name: str, payload: dict) 
     return value.get("result", {})
 
 
+def smoke_openapi(openapi: dict) -> dict[str, str]:
+    if openapi.get("openapi") != "3.1.0":
+        raise RuntimeError("released AgentGW does not expose OpenAPI 3.1")
+    operations = {
+        operation["operationId"]: f"{method.upper()} {path}"
+        for path, methods in openapi.get("paths", {}).items()
+        for method, operation in methods.items()
+        if isinstance(operation, dict) and "operationId" in operation
+    }
+    if set(operations) != EXPECTED_PUBLIC_OPERATIONS:
+        raise RuntimeError(
+            "public OpenAPI operations changed without release-smoke coverage: "
+            f"expected={sorted(EXPECTED_PUBLIC_OPERATIONS)} actual={sorted(operations)}"
+        )
+    schemes = set(openapi.get("components", {}).get("securitySchemes", {}))
+    if schemes != {"RgwHeaderToken", "RgwBearerToken"}:
+        raise RuntimeError(f"unexpected RGW security schemes: {sorted(schemes)}")
+    return operations
+
+
+def smoke_http_control(base: str, verify: str, peer: str) -> int:
+    command_url = urllib.parse.urljoin(base, "api/v1/commands")
+    request_payload = {
+        "to": peer,
+        "name": "admin.status",
+        "payload": {},
+        "timeoutMs": 15000,
+    }
+    for headers in ({}, {"x-agentweb-rgw-token": "incorrect"}):
+        result = expect_json_status(command_url, 401, payload=request_payload, headers=headers)
+        if result.get("ok") is not False:
+            raise RuntimeError(f"command authentication failure was not structured: {result}")
+
+    bearer = expect_json_status(
+        command_url,
+        200,
+        payload=request_payload,
+        headers={"Authorization": f"Bearer {verify}"},
+    )
+    if (
+        bearer.get("ok") is not True
+        or bearer.get("targetPeerId") != peer
+        or bearer.get("routeDecision") != "peer_direct"
+    ):
+        raise RuntimeError(f"Bearer command did not use the exact direct peer: {bearer}")
+
+    missing = expect_json_status(
+        command_url,
+        200,
+        payload={"to": "lgw_missing_release_smoke", "name": "admin.status", "payload": {}},
+        headers={"x-agentweb-rgw-token": verify},
+    )
+    if missing.get("ok") is not False or missing.get("routeDecision") != "peer_missing":
+        raise RuntimeError(f"unknown peer did not return peer_missing: {missing}")
+    return 4
+
+
+def smoke_http_file_api(base: str, verify: str, peer: str, path: pathlib.Path) -> dict:
+    content = b"\x00AgentWeb-public-file-api\xff\n"
+    digest = hashlib.sha256(content).hexdigest()
+    query = urllib.parse.urlencode({"to": peer, "path": str(path), "timeoutMs": 15000})
+    upload_url = urllib.parse.urljoin(base, f"api/v1/files?{query}")
+    unauthorized = expect_json_status(
+        upload_url,
+        401,
+        data=content,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    if unauthorized.get("ok") is not False:
+        raise RuntimeError(f"file upload authentication failure was not structured: {unauthorized}")
+    status, upload_headers, upload_body = request(
+        upload_url,
+        data=content,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "x-agentweb-rgw-token": verify,
+            "x-agentweb-sha256": digest,
+        },
+        timeout=30,
+    )
+    upload = json.loads(upload_body)
+    if status != 200 or upload.get("ok") is not True:
+        raise RuntimeError(f"binary upload failed: HTTP {status} {upload}")
+    if upload.get("size") != len(content) or upload.get("sha256") != digest:
+        raise RuntimeError(f"binary upload identity mismatch: {upload}")
+
+    download_query = urllib.parse.urlencode({"from": peer, "path": str(path), "timeoutMs": 15000})
+    download_url = urllib.parse.urljoin(base, f"api/v1/files?{download_query}")
+    status, download_headers, downloaded = request(
+        download_url, headers={"x-agentweb-rgw-token": verify}, timeout=30
+    )
+    if status != 200 or downloaded != content:
+        raise RuntimeError(f"binary download mismatch: HTTP {status} bytes={len(downloaded)}")
+    if header(download_headers, "x-agentweb-sha256") != digest:
+        raise RuntimeError("binary download did not return the complete-file SHA-256")
+    if header(download_headers, "accept-ranges") != "bytes":
+        raise RuntimeError("binary download did not advertise byte ranges")
+
+    status, range_headers, partial = request(
+        download_url,
+        headers={"x-agentweb-rgw-token": verify, "Range": "bytes=1-8"},
+        timeout=30,
+    )
+    if status != 206 or partial != content[1:9]:
+        raise RuntimeError(f"binary range mismatch: HTTP {status} body={partial!r}")
+    if header(range_headers, "content-range") != f"bytes 1-8/{len(content)}":
+        raise RuntimeError(f"binary range returned an invalid Content-Range: {range_headers}")
+    lane = upload.get("dataLane") or header(upload_headers, "x-agentweb-data-lane")
+    return {"bytes": len(content), "sha256": digest, "rangeBytes": len(partial), "dataLane": lane}
+
+
 def decode_mcp(headers: dict, body: bytes) -> dict:
     content_type = next((v for k, v in headers.items() if k.lower() == "content-type"), "")
     if "text/event-stream" in content_type or body.lstrip().startswith(b"data:"):
@@ -149,6 +308,91 @@ def mcp_request(url: str, payload: dict) -> dict:
     if "error" in result:
         raise RuntimeError(f"MCP returned {result['error']}")
     return result["result"]
+
+
+def mcp_structured(result: dict) -> dict:
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
+    for item in result.get("content", []):
+        if item.get("type") == "text":
+            try:
+                value = json.loads(item.get("text", ""))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+    raise RuntimeError(f"MCP tool result has no structured JSON content: {result}")
+
+
+def mcp_tool(url: str, request_id: int, name: str, arguments: dict) -> tuple[dict, dict]:
+    result = mcp_request(
+        url,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    )
+    return result, mcp_structured(result)
+
+
+def smoke_mcp_tools(url: str, verify: str, peer: str) -> dict:
+    calls = []
+
+    def call(name: str, arguments: dict) -> tuple[dict, dict]:
+        result, structured = mcp_tool(url, 100 + len(calls), name, arguments)
+        calls.append(name)
+        if result.get("isError") is True or structured.get("ok") is False:
+            raise RuntimeError(f"MCP {name} failed: {result}")
+        return result, structured
+
+    call("service_metadata", {"verify": verify})
+    _, topology = call("topo", {"verify": verify, "op": "tree"})
+    peer_prefix = peer.removeprefix("lgw_")[:5]
+    if peer_prefix not in json.dumps(topology) and peer not in json.dumps(topology):
+        raise RuntimeError("MCP topology did not expose the release-smoke peer")
+    _, skills = call("skill_list", {"verify": verify})
+    skill_ids = {item.get("id") for item in skills.get("skills", [])}
+    if not {"gateway-observation", "host-development"} <= skill_ids:
+        raise RuntimeError(f"MCP built-in skills are incomplete: {sorted(skill_ids)}")
+    call("skill_get", {"verify": verify, "skill": "host-development"})
+    _, status = call(
+        "skill_run_read",
+        {
+            "verify": verify,
+            "skill": "host-development",
+            "action": "a_status",
+            "input": {"peerId": peer},
+        },
+    )
+    if status.get("targetPeerId") != peer or status.get("routeDecision") != "peer_direct":
+        raise RuntimeError(f"MCP read did not prove the exact direct target: {status}")
+    marker = "AWMCP_RELEASE_WRITE"
+    _, executed = call(
+        "skill_run_write",
+        {
+            "verify": verify,
+            "skill": "host-development",
+            "action": "a_exec",
+            "input": {
+                "peerId": peer,
+                "command": "/bin/sh",
+                "args": ["-c", f"printf %s {marker}"],
+                "sync": True,
+                "timeout": 5,
+            },
+        },
+    )
+    record = executed.get("result", {}).get("record", {})
+    if executed.get("targetPeerId") != peer or record.get("stdout") != marker:
+        raise RuntimeError(f"MCP write did not execute on the exact target: {executed}")
+
+    invalid_result, invalid = mcp_tool(url, 199, "service_metadata", {"verify": "incorrect"})
+    if invalid_result.get("isError") is not True or invalid.get("ok") is not False:
+        raise RuntimeError(f"MCP invalid verify was accepted: {invalid_result}")
+    return {"calls": calls, "callCount": len(calls), "invalidVerifyRejected": True}
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -282,11 +526,20 @@ def main() -> int:
             )
             gateway_health = wait_json(f"http://127.0.0.1:{gateway_port}/health", gateway)
             build_info = get_json(f"http://127.0.0.1:{gateway_port}/build-info")
-            discovery = get_json(f"http://127.0.0.1:{gateway_port}/.well-known/agentweb")
+            gateway_base = f"http://127.0.0.1:{gateway_port}/"
+            discovery = get_json(urllib.parse.urljoin(gateway_base, ".well-known/agentweb"))
+            api_index = get_json(urllib.parse.urljoin(gateway_base, "api/v1"))
+            capabilities = get_json(urllib.parse.urljoin(gateway_base, "api/v1/capabilities"))
+            topology = get_json(urllib.parse.urljoin(gateway_base, "api/v1/topology?view=basic"))
             auth_headers = {"x-agentweb-rgw-token": verify}
-            get_json(f"http://127.0.0.1:{gateway_port}/api/v1/openapi.json", headers=auth_headers)
+            openapi = get_json(urllib.parse.urljoin(gateway_base, "api/v1/openapi.json"))
+            openapi_operations = smoke_openapi(openapi)
             if gateway_health.get("service") != "agentgw" or build_info["build"]["gitDirty"]:
                 raise RuntimeError("released AgentGW identity is not clean")
+            if api_index.get("service") != "agentgw" or capabilities.get("ok") is not True:
+                raise RuntimeError("released AgentGW API index or capabilities are invalid")
+            if topology.get("ok") is not True or not isinstance(topology.get("peers"), list):
+                raise RuntimeError("released AgentGW public topology is invalid")
 
             for role, node_id in role_ids.items():
                 role_dir = temp_path / role
@@ -320,6 +573,16 @@ def main() -> int:
                 f"http://127.0.0.1:{gateway_port}/api/peers",
                 set(role_ids.values()), auth_headers, managers,
             )
+            http_control_checks = smoke_http_control(gateway_base, verify, role_ids["ma"])
+            file_api = smoke_http_file_api(
+                gateway_base, verify, role_ids["ma"], temp_path / "binary-api-roundtrip.bin"
+            )
+            publication_error = expect_json_status(
+                urllib.parse.urljoin(gateway_base, "api/v1/publications/release-smoke/download"),
+                503,
+            )
+            if publication_error.get("ok") is not False or not isinstance(publication_error.get("error"), dict):
+                raise RuntimeError(f"publication registry failure was not structured: {publication_error}")
             routed_checks = 0
             for role, peer in role_ids.items():
                 status = routed_command(
@@ -375,6 +638,8 @@ def main() -> int:
                 stdout=mcp_log, stderr=subprocess.STDOUT,
             )
             wait_json(f"http://127.0.0.1:{mcp_port}/health", mcp)
+            mcp_ready = get_json(f"http://127.0.0.1:{mcp_port}/health/ready")
+            mcp_build = get_json(f"http://127.0.0.1:{mcp_port}/build-info")
             mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
             initialized = mcp_request(mcp_url, {
                 "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -389,6 +654,9 @@ def main() -> int:
                 raise RuntimeError(f"AWMCP kernel changed: {sorted(names)}")
             if initialized.get("protocolVersion") != MCP_VERSION:
                 raise RuntimeError("AWMCP negotiated an unexpected protocol version")
+            if mcp_ready.get("ready") is not True or mcp_build.get("build", {}).get("gitDirty") is not False:
+                raise RuntimeError("released AWMCP readiness or build identity is invalid")
+            mcp_evidence = smoke_mcp_tools(mcp_url, verify, role_ids["ma"])
 
             smoke_website_skills(root)
             if args.require_runtime_website_skills:
@@ -400,8 +668,9 @@ def main() -> int:
                 "ok": True,
                 "channel": args.channel,
                 "surfaces": ["http", "mcp", "websiteSkills"],
-                "businessMcpToolsInvoked": False,
+                "businessMcpToolsInvoked": True,
                 "mcpToolCount": len(tools),
+                "mcpToolCalls": mcp_evidence,
                 "agentgwGitSha": manifests["agentgw"]["gitSha"],
                 "awmcpGitSha": manifests["awmcp"]["gitSha"],
                 "runtimeMcpAdvertised": discovery["interfaces"].get("mcp"),
@@ -409,6 +678,10 @@ def main() -> int:
                 "mabcPeers": role_ids,
                 "mabcRoutedCommandCount": routed_checks,
                 "mabcFileRoundTrips": len(role_ids),
+                "httpControlChecks": http_control_checks,
+                "httpFileApi": file_api,
+                "openapiOperations": openapi_operations,
+                "publicationRegistryUnavailableRejected": True,
             }
             output = pathlib.Path(args.output)
             output.parent.mkdir(parents=True, exist_ok=True)

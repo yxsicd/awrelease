@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 35
     env:
       GITHUB_TOKEN: ${{ github.token }}
-      CHANNEL: ${{ inputs.channel || 'prod' }}
+      CHANNEL: ${{ inputs.channel || github.event.release.tag_name || 'prod' }}
     steps:
       - uses: actions/checkout@v7
       - name: Install ephemeral path router
