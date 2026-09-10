@@ -101,6 +101,10 @@ Run the same black-box check locally on Linux amd64:
 python3 scripts/release_smoke.py --channel prod --output /tmp/agentweb-release-smoke.json
 ```
 
+The workflow dispatch accepts `dev`, `main`, or `prod`, so a newly published
+`dev` artifact set can pass the same black-box gate before promotion. Pushes,
+scheduled runs, and release events continue to validate both `main` and `prod`.
+
 Source code and environment-specific deployment state remain in their owning
 repositories and hosts. This repository stores public onboarding material and
 release bytes only.

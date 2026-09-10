@@ -53,7 +53,9 @@ if source_installer.is_file():
 
 workflow = (root / ".github" / "workflows" / "release-smoke.yml").read_text()
 assert "--require-runtime-website-skills" in workflow
-assert "matrix:\n        channel: [main, prod]" in workflow
+assert "options: [dev, main, prod]" in workflow
+assert "github.event_name == 'workflow_dispatch'" in workflow
+assert "'[\"main\",\"prod\"]'" in workflow
 
 smoke = (root / "scripts" / "release_smoke.py").read_text()
 for required in ("mabcPeers", "mabcRoutedCommandCount", '"manager.child.list"', '"admin.fs.write"'):
