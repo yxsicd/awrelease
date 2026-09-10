@@ -53,11 +53,18 @@ class RedundantMeshTests(unittest.TestCase):
     def test_endpoint_bundle_requires_all_four_platforms(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            for endpoint in self.endpoints():
-                target = root / endpoint["platform"]
-                target.mkdir()
-                (target / "endpoint.json").write_text(json.dumps(endpoint))
+            (root / "endpoint.json").write_text(json.dumps({"gateways": self.endpoints()}))
             self.assertEqual(list(MESH.PLATFORMS), [item["platform"] for item in MESH.read_endpoints(root)])
+
+    def test_path_router_maps_one_public_origin_to_four_backends(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "haproxy.cfg"
+            ports = {item: 18080 + index for index, item in enumerate(MESH.PLATFORMS)}
+            MESH.write_haproxy_config(path, 19000, ports)
+            config = path.read_text()
+        for item in MESH.PLATFORMS:
+            self.assertIn(f"path_beg /{item}", config)
+            self.assertIn(f"127.0.0.1:{ports[item]}", config)
 
 
 if __name__ == "__main__":

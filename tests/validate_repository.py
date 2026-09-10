@@ -62,8 +62,8 @@ for required in ("mabcPeers", "mabcRoutedCommandCount", '"manager.child.list"', 
 mesh_workflow = (root / ".github" / "workflows" / "cross-platform-install-mesh.yml").read_text()
 for required in (
     "ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "windows-2025",
-    "install.ps1", "install.sh", "gateway-configure", "gateway-failover-test",
-    "mesh-ready-", "mesh-failover-",
+    "install.ps1", "install.sh", "gateway-cluster-start", "gateway-failover-test",
+    "haproxy", "mesh-endpoints-", "mesh-failover-",
 ):
     assert required in mesh_workflow, required
 mesh = (root / "scripts" / "cross_platform_mesh.py").read_text()

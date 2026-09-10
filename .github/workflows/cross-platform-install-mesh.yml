@@ -23,6 +23,58 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  coordinator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CHANNEL: ${{ inputs.channel || 'prod' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ephemeral path router
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y haproxy
+      - name: Start four all-in-one gateways behind one public tunnel
+        run: >-
+          python3 scripts/cross_platform_mesh.py gateway-cluster-start
+          --channel "$CHANNEL"
+          --state "$RUNNER_TEMP/mesh-coordinator"
+      - name: Publish redundant gateway endpoints
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-endpoints-${{ github.run_id }}
+          path: ${{ runner.temp }}/mesh-coordinator/endpoint.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Keep gateways alive until every native client passes
+        run: >-
+          python3 scripts/github_artifact_bus.py wait-count
+          --prefix "mesh-result-${{ github.run_id }}-"
+          --count 4
+          --timeout 1200
+      - name: Stop one gateway, route through a survivor, and recover it
+        run: >-
+          python3 scripts/cross_platform_mesh.py gateway-failover-test
+          --state "$RUNNER_TEMP/mesh-coordinator"
+          --endpoints "$RUNNER_TEMP/mesh-coordinator/endpoint.json"
+          --output "$RUNNER_TEMP/mesh-failover/result.json"
+      - name: Publish failover result
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-failover-${{ github.run_id }}
+          path: ${{ runner.temp }}/mesh-failover/result.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload coordinator diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-gateway-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/mesh-coordinator/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
   native-install-and-mesh:
     name: native install and redundant mesh (${{ matrix.platform }})
     strategy:
@@ -41,68 +93,32 @@ jobs:
     timeout-minutes: 35
     env:
       GITHUB_TOKEN: ${{ github.token }}
-      CHANNEL: ${{ inputs.channel || 'prod' }}
     steps:
       - uses: actions/checkout@v7
-      - name: Start this platform's ephemeral gateway
+      - name: Wait for the redundant gateway set
         shell: bash
         run: >-
-          python scripts/cross_platform_mesh.py gateway-start
-          --channel "$CHANNEL"
-          --platform "${{ matrix.platform }}"
-          --state "$RUNNER_TEMP/mesh-gateway"
-      - name: Publish this platform's gateway endpoint
-        uses: actions/upload-artifact@v7
-        with:
-          name: mesh-gateway-${{ github.run_id }}-${{ matrix.platform }}
-          path: ${{ runner.temp }}/mesh-gateway/endpoint.json
-          if-no-files-found: error
-          retention-days: 1
-      - name: Download all four gateway endpoints
-        shell: bash
-        run: |
-          for platform in linux-x64 linux-arm64 macos-arm64 windows-x64; do
-            python scripts/github_artifact_bus.py wait-download \
-              --name "mesh-gateway-${{ github.run_id }}-${platform}" \
-              --out "$RUNNER_TEMP/mesh-endpoints/${platform}" \
-              --timeout 900
-          done
-      - name: Join this all-in-one gateway to the redundant set
-        shell: bash
-        run: >-
-          python scripts/cross_platform_mesh.py gateway-configure
-          --state "$RUNNER_TEMP/mesh-gateway"
-          --endpoints "$RUNNER_TEMP/mesh-endpoints"
-      - name: Publish gateway readiness
-        uses: actions/upload-artifact@v7
-        with:
-          name: mesh-ready-${{ github.run_id }}-${{ matrix.platform }}
-          path: ${{ runner.temp }}/mesh-gateway/endpoint.json
-          if-no-files-found: error
-          retention-days: 1
-      - name: Wait for all redundant gateways
-        shell: bash
-        run: >-
-          python scripts/github_artifact_bus.py wait-count
-          --prefix "mesh-ready-${{ github.run_id }}-"
-          --count 4
+          python scripts/github_artifact_bus.py wait-download
+          --name "mesh-endpoints-${{ github.run_id }}"
+          --out "${{ runner.temp }}/mesh-endpoints"
           --timeout 900
-      - name: Install POSIX Mabc from this public gateway
+      - name: Install POSIX Mabc from this platform's gateway
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          gateway="$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/mesh-gateway/endpoint.json"))["url"])')"
+          gateway="$(python3 -c 'import json; p="${{ matrix.platform }}"; print(next(x["url"] for x in json.load(open("${{ runner.temp }}/mesh-endpoints/endpoint.json"))["gateways"] if x["platform"] == p))')"
           AGENTWEB_HOME="${{ runner.temp }}/agentweb" \
             sh install.sh \
               --gateway "$gateway" \
               --device "gha-${{ matrix.platform }}-${{ github.run_id }}" \
               --profile production \
               --basic agentwebadmin
-      - name: Install Windows Mabc from this public gateway
+      - name: Install Windows Mabc from this platform's gateway
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $gateway = (Get-Content -Raw "${{ runner.temp }}/mesh-gateway/endpoint.json" | ConvertFrom-Json).url
+          $bundle = Get-Content -Raw "${{ runner.temp }}/mesh-endpoints/endpoint.json" | ConvertFrom-Json
+          $gateway = ($bundle.gateways | Where-Object platform -eq '${{ matrix.platform }}').url
           & ./install.ps1 `
             -Gateway $gateway `
             -DeviceName "gha-${{ matrix.platform }}-${{ github.run_id }}" `
@@ -113,7 +129,7 @@ jobs:
         shell: bash
         run: >-
           python scripts/cross_platform_mesh.py client-test
-          --endpoints "$RUNNER_TEMP/mesh-endpoints"
+          --endpoints "${{ runner.temp }}/mesh-endpoints/endpoint.json"
           --platform "${{ matrix.platform }}"
           --output "${{ runner.temp }}/mesh-result/result.json"
       - name: Publish native client result
@@ -123,41 +139,10 @@ jobs:
           path: ${{ runner.temp }}/mesh-result/result.json
           if-no-files-found: error
           retention-days: 14
-      - name: Keep every platform alive through baseline completion
-        shell: bash
-        run: >-
-          python scripts/github_artifact_bus.py wait-count
-          --prefix "mesh-result-${{ github.run_id }}-"
-          --count 4
-          --timeout 1200
-      - name: Stop one gateway, route through a survivor, and recover it
-        if: matrix.platform == 'linux-x64'
-        shell: bash
-        run: >-
-          python scripts/cross_platform_mesh.py gateway-failover-test
-          --state "$RUNNER_TEMP/mesh-gateway"
-          --endpoints "$RUNNER_TEMP/mesh-endpoints"
-          --output "${{ runner.temp }}/mesh-failover/result.json"
-      - name: Publish failover result
-        if: matrix.platform == 'linux-x64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: mesh-failover-${{ github.run_id }}
-          path: ${{ runner.temp }}/mesh-failover/result.json
-          if-no-files-found: error
-          retention-days: 14
-      - name: Keep every gateway alive through failover recovery
+      - name: Keep installed peers alive through failover recovery
         shell: bash
         run: >-
           python scripts/github_artifact_bus.py wait-download
           --name "mesh-failover-${{ github.run_id }}"
           --out "${{ runner.temp }}/mesh-failover-proof"
           --timeout 900
-      - name: Upload gateway diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mesh-gateway-diagnostics-${{ github.run_id }}-${{ matrix.platform }}
-          path: ${{ runner.temp }}/mesh-gateway/*.log
-          if-no-files-found: warn
-          retention-days: 14

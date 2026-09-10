@@ -231,16 +231,38 @@ def gateway_environment(
     }
 
 
-def gateway_start(state_dir: pathlib.Path, channel: str, platform_name: str) -> None:
+def write_haproxy_config(path: pathlib.Path, bind_port: int, backend_ports: dict[str, int]) -> None:
+    lines = [
+        "global", "  maxconn 2048", "defaults", "  mode http", "  timeout connect 10s",
+        "  timeout client 5m", "  timeout server 5m", "frontend mesh", f"  bind 127.0.0.1:{bind_port}",
+    ]
+    for item in PLATFORMS:
+        safe = item.replace("-", "_")
+        lines.extend([f"  acl path_{safe} path_beg /{item}", f"  use_backend gw_{safe} if path_{safe}"])
+    for item in PLATFORMS:
+        safe = item.replace("-", "_")
+        lines.extend([
+            f"backend gw_{safe}",
+            f"  http-request set-path %[path,regsub(^/{item},)]",
+            f"  server gw_{safe} 127.0.0.1:{backend_ports[item]}",
+        ])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def gateway_cluster_start(state_dir: pathlib.Path, channel: str) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    port = free_port()
     binary = download_agentgw(channel, state_dir)
     cloudflared = download_cloudflared(state_dir)
+    backend_ports = {item: free_port() for item in PLATFORMS}
+    proxy_port = free_port()
+    haproxy_config = state_dir / "haproxy.cfg"
+    write_haproxy_config(haproxy_config, proxy_port, backend_ports)
+    proxy = start_detached(["haproxy", "-f", str(haproxy_config), "-db"], {}, state_dir / "haproxy.log")
     tunnel_log = state_dir / "cloudflared.log"
     tunnel = start_detached(
-        [str(cloudflared), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"], {}, tunnel_log,
+        [str(cloudflared), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{proxy_port}"], {}, tunnel_log,
     )
-    gateway = None
+    gateways: dict[str, subprocess.Popen] = {}
     try:
         deadline = time.monotonic() + 90
         public_url = ""
@@ -253,34 +275,66 @@ def gateway_start(state_dir: pathlib.Path, channel: str, platform_name: str) -> 
             time.sleep(1)
         if not public_url:
             raise RuntimeError(f"Cloudflare quick tunnel did not start: {tunnel_log.read_text(errors='ignore')[-1000:]}")
-        endpoint = {"url": public_url, "channel": channel, "platform": platform_name}
-        write_topology(state_dir / "topology.json", [endpoint])
-        env = gateway_environment(state_dir, channel, platform_name, public_url, port, "all-in-one", [])
-        gateway = start_detached([str(binary)], env, state_dir / "agentgw.log")
-        wait_json(f"http://127.0.0.1:{port}/health", gateway)
-        wait_json(f"{public_url}/health", timeout=60)
-        (state_dir / "endpoint.json").write_text(json.dumps(endpoint, indent=2) + "\n", encoding="utf-8")
+        endpoints = [{"url": f"{public_url}/{item}", "channel": channel, "platform": item} for item in PLATFORMS]
+        for endpoint in endpoints:
+            item = endpoint["platform"]
+            gateway_dir = state_dir / item
+            gateway_dir.mkdir()
+            write_topology(gateway_dir / "topology.json", endpoints)
+            env = gateway_environment(gateway_dir, channel, item, endpoint["url"], backend_ports[item], "all-in-one", [])
+            gateway = start_detached([str(binary)], env, gateway_dir / "agentgw.log")
+            gateways[item] = gateway
+            wait_json(f"http://127.0.0.1:{backend_ports[item]}/health", gateway)
+        for endpoint in endpoints:
+            wait_json(f"{endpoint['url']}/health", timeout=90)
+
+        for endpoint in endpoints:
+            item = endpoint["platform"]
+            gateway_dir = state_dir / item
+            device_name = f"gha-gateway-{item}-{os.environ.get('GITHUB_RUN_ID', 'local')}"
+            token = issue_device_token(endpoint["url"], device_name)
+            stop_pid(gateways[item].pid)
+            remote_gws = [
+                f"{candidate['url'].replace('https://', 'wss://', 1)}/ws?role=upstream"
+                for candidate in endpoints if candidate != endpoint
+            ]
+            env = gateway_environment(
+                gateway_dir, channel, item, endpoint["url"], backend_ports[item], "all-in-one", remote_gws, token,
+            )
+            (gateway_dir / "gateway-env.json").write_text(json.dumps(env), encoding="utf-8")
+            gateway = start_detached([str(binary)], env, gateway_dir / "agentgw.log")
+            gateways[item] = gateway
+            wait_json(f"http://127.0.0.1:{backend_ports[item]}/health", gateway)
+            wait_json(f"{endpoint['url']}/health", timeout=90)
+
+        bundle = {"channel": channel, "gateways": endpoints, "platforms": list(PLATFORMS)}
+        (state_dir / "endpoint.json").write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
         (state_dir / "runtime.json").write_text(json.dumps({
-            "gatewayPid": gateway.pid, "tunnelPid": tunnel.pid, "port": port, "binary": str(binary),
-            "channel": channel, "platform": platform_name, "publicUrl": public_url,
+            "tunnelPid": tunnel.pid, "proxyPid": proxy.pid, "binary": str(binary), "channel": channel,
+            "publicUrl": public_url,
+            "gateways": [{"platform": item, "gatewayPid": gateways[item].pid, "port": backend_ports[item]} for item in PLATFORMS],
         }, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps(endpoint))
+        print(json.dumps(bundle))
     except Exception:
-        if gateway is not None and gateway.poll() is None:
-            stop_pid(gateway.pid)
+        for gateway in gateways.values():
+            if gateway.poll() is None:
+                stop_pid(gateway.pid)
         if tunnel.poll() is None:
             stop_pid(tunnel.pid)
+        if proxy.poll() is None:
+            stop_pid(proxy.pid)
         raise
 
 
-def read_endpoints(root: pathlib.Path) -> list[dict]:
-    endpoints = []
-    for item in PLATFORMS:
-        path = root / item / "endpoint.json"
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if value.get("platform") != item or not str(value.get("url", "")).startswith("https://"):
-            raise RuntimeError(f"invalid endpoint artifact for {item}: {value}")
-        endpoints.append(value)
+def read_endpoints(path: pathlib.Path) -> list[dict]:
+    if path.is_dir():
+        path = path / "endpoint.json"
+    bundle = json.loads(path.read_text(encoding="utf-8"))
+    endpoints = bundle.get("gateways", [])
+    if [item.get("platform") for item in endpoints] != list(PLATFORMS):
+        raise RuntimeError(f"endpoint bundle does not contain the four platforms: {bundle}")
+    if not all(str(item.get("url", "")).startswith("https://") for item in endpoints):
+        raise RuntimeError(f"endpoint bundle contains a non-HTTPS gateway: {bundle}")
     return endpoints
 
 
@@ -318,29 +372,6 @@ def issue_device_token(public_url: str, device_name: str) -> str:
     if not token:
         raise RuntimeError("gateway enrollment manifest omitted enrollmentToken")
     return token
-
-
-def gateway_configure(state_dir: pathlib.Path, endpoints_root: pathlib.Path) -> None:
-    runtime_path = state_dir / "runtime.json"
-    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
-    endpoints = read_endpoints(endpoints_root)
-    write_topology(state_dir / "topology.json", endpoints)
-    own = next(item for item in endpoints if item["platform"] == runtime["platform"])
-    device_name = f"gha-gateway-{runtime['platform']}-{os.environ.get('GITHUB_RUN_ID', 'local')}"
-    token = issue_device_token(own["url"], device_name)
-    stop_pid(int(runtime["gatewayPid"]))
-    remote_gws = [f"{item['url'].replace('https://', 'wss://', 1)}/ws?role=upstream" for item in endpoints if item != own]
-    env = gateway_environment(
-        state_dir, runtime["channel"], runtime["platform"], runtime["publicUrl"],
-        int(runtime["port"]), "all-in-one", remote_gws, token,
-    )
-    (state_dir / "gateway-env.json").write_text(json.dumps(env), encoding="utf-8")
-    gateway = start_detached([runtime["binary"]], env, state_dir / "agentgw.log")
-    runtime["gatewayPid"] = gateway.pid
-    runtime_path.write_text(json.dumps(runtime, indent=2) + "\n", encoding="utf-8")
-    wait_json(f"http://127.0.0.1:{runtime['port']}/health", gateway)
-    wait_json(f"{runtime['publicUrl']}/health", timeout=60)
-    print(json.dumps({"ok": True, "platform": runtime["platform"], "gatewayMode": "all-in-one", "upstreamCount": len(remote_gws)}))
 
 
 def route(base: str, peer: str, name: str, payload: dict) -> dict:
@@ -473,16 +504,18 @@ def public_gateway_is_down(url: str, timeout: int = 45) -> bool:
     return False
 
 
-def gateway_failover_test(state_dir: pathlib.Path, endpoints_root: pathlib.Path, output: pathlib.Path) -> None:
+def gateway_failover_test(state_dir: pathlib.Path, endpoints_path: pathlib.Path, output: pathlib.Path) -> None:
     runtime_path = state_dir / "runtime.json"
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
-    endpoints = read_endpoints(endpoints_root)
-    own = next(item for item in endpoints if item["platform"] == runtime["platform"])
-    survivor = next(item for item in endpoints if item["platform"] != runtime["platform"])
-    stop_pid(int(runtime["gatewayPid"]))
+    endpoints = read_endpoints(endpoints_path)
+    failed_platform = "linux-x64"
+    own = next(item for item in endpoints if item["platform"] == failed_platform)
+    survivor = next(item for item in endpoints if item["platform"] != failed_platform)
+    failed_runtime = next(item for item in runtime["gateways"] if item["platform"] == failed_platform)
+    stop_pid(int(failed_runtime["gatewayPid"]))
     if not public_gateway_is_down(own["url"]):
         raise RuntimeError(f"failed gateway remained healthy after owned PID stopped: {own['url']}")
-    selected = [peer for peer in wait_for_mabc(survivor["url"]) if peer_platform(peer) == runtime["platform"]]
+    selected = [peer for peer in wait_for_mabc(survivor["url"]) if peer_platform(peer) == failed_platform]
     if len(selected) != 3:
         raise RuntimeError(f"survivor did not retain the failed host's three Mabc peers: {selected}")
     checks = 0
@@ -491,24 +524,25 @@ def gateway_failover_test(state_dir: pathlib.Path, endpoints_root: pathlib.Path,
         if status.get("ok") is not True:
             raise RuntimeError(f"survivor status failed for {peer['id']}")
         checks += 1
-    marker = f"AWFAILOVER_{runtime['platform']}_{os.environ.get('GITHUB_RUN_ID', 'local')}".replace("-", "_")
+    marker = f"AWFAILOVER_{failed_platform}_{os.environ.get('GITHUB_RUN_ID', 'local')}".replace("-", "_")
     checks += verify_exec_and_file(survivor["url"], selected[0], marker)
-    env = json.loads((state_dir / "gateway-env.json").read_text(encoding="utf-8"))
-    gateway = start_detached([runtime["binary"]], env, state_dir / "agentgw.log")
-    runtime["gatewayPid"] = gateway.pid
+    gateway_dir = state_dir / failed_platform
+    env = json.loads((gateway_dir / "gateway-env.json").read_text(encoding="utf-8"))
+    gateway = start_detached([runtime["binary"]], env, gateway_dir / "agentgw.log")
+    failed_runtime["gatewayPid"] = gateway.pid
     runtime_path.write_text(json.dumps(runtime, indent=2) + "\n", encoding="utf-8")
-    wait_json(f"http://127.0.0.1:{runtime['port']}/health", gateway)
-    wait_json(runtime["publicUrl"] + "/health", timeout=60)
-    recovered = wait_for_mabc(runtime["publicUrl"], timeout=180)
-    recovered_gateway_peers = wait_for_gateway_peers(runtime["publicUrl"], runtime["platform"], timeout=180)
+    wait_json(f"http://127.0.0.1:{failed_runtime['port']}/health", gateway)
+    wait_json(own["url"] + "/health", timeout=90)
+    recovered = wait_for_mabc(own["url"], timeout=180)
+    recovered_gateway_peers = wait_for_gateway_peers(own["url"], failed_platform, timeout=180)
     for peer in recovered:
-        status = route(runtime["publicUrl"], peer["id"], "admin.status", {})
+        status = route(own["url"], peer["id"], "admin.status", {})
         if status.get("ok") is not True:
             raise RuntimeError(f"recovered gateway status failed for {peer['id']}")
         checks += 1
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps({
-        "ok": True, "failedGateway": runtime["platform"], "survivingGateway": survivor["platform"],
+        "ok": True, "failedGateway": failed_platform, "survivingGateway": survivor["platform"],
         "failedGatewayObservedDown": True, "retainedMabcPeerCount": len(selected),
         "recoveredPeerCount": len(recovered), "recoveredGatewayPeerCount": len(recovered_gateway_peers),
         "routedCheckCount": checks, "routeDecision": "peer_direct",
@@ -519,13 +553,9 @@ def gateway_failover_test(state_dir: pathlib.Path, endpoints_root: pathlib.Path,
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    start = sub.add_parser("gateway-start")
+    start = sub.add_parser("gateway-cluster-start")
     start.add_argument("--state", type=pathlib.Path, required=True)
     start.add_argument("--channel", choices=("main", "prod"), default="prod")
-    start.add_argument("--platform", choices=PLATFORMS, required=True)
-    configure = sub.add_parser("gateway-configure")
-    configure.add_argument("--state", type=pathlib.Path, required=True)
-    configure.add_argument("--endpoints", type=pathlib.Path, required=True)
     client = sub.add_parser("client-test")
     client.add_argument("--endpoints", type=pathlib.Path, required=True)
     client.add_argument("--platform", choices=PLATFORMS, required=True)
@@ -535,10 +565,8 @@ def main() -> int:
     failover.add_argument("--endpoints", type=pathlib.Path, required=True)
     failover.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
-    if args.command == "gateway-start":
-        gateway_start(args.state, args.channel, args.platform)
-    elif args.command == "gateway-configure":
-        gateway_configure(args.state, args.endpoints)
+    if args.command == "gateway-cluster-start":
+        gateway_cluster_start(args.state, args.channel)
     elif args.command == "client-test":
         client_test(args.endpoints, args.platform, args.output)
     else:
