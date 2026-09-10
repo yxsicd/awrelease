@@ -8,6 +8,13 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Public release channel to validate
+        required: true
+        default: main
+        type: choice
+        options: [dev, main, prod]
 
 permissions:
   contents: read
@@ -21,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        channel: [main, prod]
+        channel: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.channel) || '["main","prod"]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -31,6 +38,7 @@ jobs:
           sh -n install.sh
           sh install.sh --help
           python3 tests/validate_repository.py
+          python3 -m unittest discover -s tests -v
       - name: Install released binaries and smoke three surfaces
         run: |
           mkdir -p "$RUNNER_TEMP/awrelease-smoke"

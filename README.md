@@ -75,20 +75,23 @@ https://github.com/yxsicd/awrelease/releases/download/prod/awmcp-prod.json
 
 GitHub Actions runs the public `main` and `prod` binaries without private source
 or credentials. It verifies manifests and hashes, starts RGW plus same-host
-Ma/Mb/Mc, routes status, command execution, file round trips, and manager
-inspection through RGW to every exact peer, then checks AWMCP read-only
-`initialize`/`tools/list` and both Website Skills surfaces. It never invokes an
-MCP business tool.
+Ma/Mb/Mc, checks every operation advertised by AgentGW's public OpenAPI, and
+exercises header/Bearer authentication, structured failures, exact routed
+commands, binary upload/download, byte ranges, and all three manager roles. It
+also negotiates MCP, requires the stable eight-tool kernel, invokes discovery
+and host-development Skills through MCP, rejects an invalid verify value, and
+follows both release and runtime Website Skills.
 
 The cross-platform install mesh additionally runs the real public installer on
 Linux x64, Linux arm64, macOS arm64, and Windows x64. Each native host starts a
 separate local RGW process, then installs Ma/Mb/Mc through that RGW. Every host
 RGW connects outbound to two independent central RGWs behind one public tunnel.
 The gate proves local `peer_direct` routing and central
-`upstream_local_peer` routing to each exact Ma/Mb/Mc LGW, including synchronous
-command and file round trips. It then stops one central RGW, proves all four
-host RGWs and all twelve Ma/Mb/Mc peers remain reachable through the survivor,
-restarts the failed RGW, and requires the full peer set again. The tunnel,
+`upstream_local_peer` routing from every native runner to all twelve Ma/Mb/Mc
+peers, including synchronous command and file round trips through both central
+RGWs. It then stops one central RGW, repeats command and file checks for all
+twelve peers through the survivor, restarts the failed RGW, and requires the
+full peer set again. The tunnel,
 topology, and enrollment signing key exist only for that workflow run; no
 private deployment endpoint or credential is used.
 
@@ -97,6 +100,10 @@ Run the same black-box check locally on Linux amd64:
 ```sh
 python3 scripts/release_smoke.py --channel prod --output /tmp/agentweb-release-smoke.json
 ```
+
+The workflow dispatch accepts `dev`, `main`, or `prod`, so a newly published
+`dev` artifact set can pass the same black-box gate before promotion. Pushes,
+scheduled runs, and release events continue to validate both `main` and `prod`.
 
 Source code and environment-specific deployment state remain in their owning
 repositories and hosts. This repository stores public onboarding material and

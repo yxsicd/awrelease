@@ -8,7 +8,7 @@ catalog = json.loads((root / "skills.json").read_text())
 
 private_markers = ("yxsbase" + ".win", "yxstest" + ".rnd.huawei.com")
 for path in root.rglob("*"):
-    if path.is_file() and ".git" not in path.parts:
+    if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts:
         text = path.read_text(errors="ignore").lower()
         for marker in private_markers:
             assert marker not in text, f"private domain leaked by {path.relative_to(root)}"
@@ -53,7 +53,9 @@ if source_installer.is_file():
 
 workflow = (root / ".github" / "workflows" / "release-smoke.yml").read_text()
 assert "--require-runtime-website-skills" in workflow
-assert "matrix:\n        channel: [main, prod]" in workflow
+assert "options: [dev, main, prod]" in workflow
+assert "github.event_name == 'workflow_dispatch'" in workflow
+assert "'[\"main\",\"prod\"]'" in workflow
 
 smoke = (root / "scripts" / "release_smoke.py").read_text()
 for required in ("mabcPeers", "mabcRoutedCommandCount", '"manager.child.list"', '"admin.fs.write"'):
@@ -62,18 +64,21 @@ for required in ("mabcPeers", "mabcRoutedCommandCount", '"manager.child.list"', 
 mesh_workflow = (root / ".github" / "workflows" / "cross-platform-install-mesh.yml").read_text()
 for required in (
     "ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "windows-2025",
-    "install.ps1", "install.sh", "gateway-cluster-start", "gateway-failover-test",
+    "install.ps1", "install.sh", "central-start", "gateway-failover-test",
     "haproxy", "mesh-endpoints-", "mesh-failover-",
+    "github.event.release.tag_name",
 ):
     assert required in mesh_workflow, required
 mesh = (root / "scripts" / "cross_platform_mesh.py").read_text()
 for required in (
     "linux-x64", "linux-arm64", "macos-arm64", "windows-x64",
-    '"all-in-one"', '"gatewayCount"', '"gatewayPeerCountPerGateway"',
-    '"failedGatewayObservedDown"', '"recoveredGatewayPeerCount"', '"routeDecision"',
+    '"centralGateways"', '"localMabcCount"', '"targetPlatformCounts"',
+    '"failedEndpointObservedDown"', '"recoveredMabcCount"', '"routeDecision"',
+    '"failoverExecFilePeerCount"',
 ):
     assert required in mesh, required
 assert (root / "tests" / "test_github_artifact_bus.py").is_file()
 assert (root / "tests" / "test_cross_platform_mesh.py").is_file()
+assert (root / "tests" / "test_release_smoke.py").is_file()
 
 print("OK awrelease repository contract")
