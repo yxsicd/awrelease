@@ -35,6 +35,33 @@ def artifacts() -> list[dict]:
     return api(f"/repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100")["artifacts"]
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def download_archive(url: str) -> bytes:
+    """Exchange GitHub auth for the signed blob URL without leaking the bearer."""
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}", "User-Agent": "awrelease-mesh/1"},
+    )
+    opener = urllib.request.build_opener(NoRedirect())
+    try:
+        opener.open(req, timeout=60)
+    except urllib.error.HTTPError as error:
+        if error.code not in {301, 302, 303, 307, 308}:
+            raise
+        location = error.headers.get("Location")
+        if not location:
+            raise RuntimeError("artifact download redirect had no Location") from error
+    else:
+        raise RuntimeError("artifact download API did not return a signed redirect")
+    unsigned = urllib.request.Request(location, headers={"User-Agent": "awrelease-mesh/1"})
+    with urllib.request.urlopen(unsigned, timeout=60) as response:
+        return response.read()
+
+
 def wait_for(predicate, timeout: int) -> list[dict]:
     deadline = time.monotonic() + timeout
     last: list[dict] = []
@@ -65,14 +92,9 @@ def main() -> int:
     if args.command == "wait-download":
         items = wait_for(lambda xs: any(x["name"] == args.name for x in xs), args.timeout)
         artifact = next(x for x in items if x["name"] == args.name)
-        req = urllib.request.Request(
-            artifact["archive_download_url"],
-            headers={"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}", "User-Agent": "awrelease-mesh/1"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as response:
-            archive = zipfile.ZipFile(io.BytesIO(response.read()))
-            args.out.mkdir(parents=True, exist_ok=True)
-            archive.extractall(args.out)
+        archive = zipfile.ZipFile(io.BytesIO(download_archive(artifact["archive_download_url"])))
+        args.out.mkdir(parents=True, exist_ok=True)
+        archive.extractall(args.out)
         return 0
 
     items = wait_for(

@@ -65,5 +65,6 @@ for required in ("ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "windows-2025",
 mesh = (root / "scripts" / "cross_platform_mesh.py").read_text()
 for required in ("linux-x64", "linux-arm64", "macos-arm64", "windows-x64", '"routeDecision"'):
     assert required in mesh, required
+assert (root / "tests" / "test_github_artifact_bus.py").is_file()
 
 print("OK awrelease repository contract")
