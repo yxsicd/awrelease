@@ -14,7 +14,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import tarfile
 import time
 import urllib.error
 import urllib.parse
@@ -98,33 +97,6 @@ def download_agentgw(channel: str, directory: pathlib.Path) -> pathlib.Path:
     if platform.system() == "Darwin":
         subprocess.run(["codesign", "--force", "--sign", "-", str(binary)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    return binary
-
-
-def download_cloudflared(directory: pathlib.Path) -> pathlib.Path:
-    assets = {
-        "linux-x64-musl": "cloudflared-linux-amd64",
-        "linux-arm64-musl": "cloudflared-linux-arm64",
-        "macos-arm64": "cloudflared-darwin-arm64.tgz",
-        "windows-x64": "cloudflared-windows-amd64.exe",
-    }
-    asset = assets[artifact_key()]
-    downloaded = directory / asset
-    download(f"https://github.com/cloudflare/cloudflared/releases/latest/download/{asset}", downloaded)
-    if asset.endswith(".tgz"):
-        with tarfile.open(downloaded, "r:gz") as archive:
-            member = next(item for item in archive.getmembers() if pathlib.PurePosixPath(item.name).name == "cloudflared")
-            source = archive.extractfile(member)
-            if source is None:
-                raise RuntimeError("cloudflared archive has no binary")
-            binary = directory / "cloudflared"
-            with source, binary.open("wb") as output:
-                shutil.copyfileobj(source, output)
-    else:
-        binary = directory / ("cloudflared.exe" if platform.system() == "Windows" else "cloudflared")
-        if downloaded != binary:
-            downloaded.replace(binary)
-    binary.chmod(0o755)
     return binary
 
 
@@ -244,14 +216,17 @@ def write_haproxy_config(path: pathlib.Path, bind_port: int, backend_ports: dict
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def start_public_tunnel(cloudflared: pathlib.Path, proxy_port: int, state_dir: pathlib.Path):
-    pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+def start_public_tunnel(proxy_port: int, state_dir: pathlib.Path):
+    pattern = re.compile(r"https://[a-z0-9-]+\.free\.pinggy\.net")
     failures = []
-    for attempt in range(1, 5):
-        log = state_dir / f"cloudflared-{attempt}.log"
-        process = start_detached([str(cloudflared), "tunnel", "--no-autoupdate", "--url",
-                                  f"http://127.0.0.1:{proxy_port}"], {}, log)
-        deadline = time.monotonic() + 45
+    for attempt in range(1, 4):
+        log = state_dir / f"pinggy-{attempt}.log"
+        process = start_detached([
+            "ssh", "-T", "-p", "443", "-o", "ExitOnForwardFailure=yes",
+            "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ServerAliveInterval=30", "-R", f"0:127.0.0.1:{proxy_port}", "a.pinggy.io",
+        ], {}, log)
+        deadline = time.monotonic() + 30
         public_url = ""
         while time.monotonic() < deadline and process.poll() is None:
             match = pattern.search(log.read_text(errors="ignore") if log.exists() else "")
@@ -266,13 +241,12 @@ def start_public_tunnel(cloudflared: pathlib.Path, proxy_port: int, state_dir: p
             time.sleep(2)
         failures.append(f"attempt {attempt}: {log.read_text(errors='ignore')[-500:]}")
         stop_process(process)
-    raise RuntimeError("Cloudflare quick tunnel failed after four owned attempts: " + " | ".join(failures))
+    raise RuntimeError("Pinggy HTTPS tunnel failed after three owned attempts: " + " | ".join(failures))
 
 
 def central_start(state_dir: pathlib.Path, channel: str) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     binary = download_agentgw(channel, state_dir)
-    cloudflared = download_cloudflared(state_dir)
     backend_ports = {name: free_port() for name in CENTRAL_IDS}
     proxy_port = free_port()
     config = state_dir / "haproxy.cfg"
@@ -282,7 +256,7 @@ def central_start(state_dir: pathlib.Path, channel: str) -> None:
     tunnel = None
     gateways: dict[str, subprocess.Popen] = {}
     try:
-        tunnel, public_url = start_public_tunnel(cloudflared, proxy_port, state_dir)
+        tunnel, public_url = start_public_tunnel(proxy_port, state_dir)
         endpoints = [{"id": name, "url": f"{public_url}/{name}"} for name in CENTRAL_IDS]
         for endpoint in endpoints:
             name = endpoint["id"]
