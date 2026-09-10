@@ -3,6 +3,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -73,6 +74,30 @@ class RedundantMeshTests(unittest.TestCase):
     def test_nested_peer_platform_reads_transitive_advertisement(self):
         peer = {"id": "lgw_x", "deviceName": "gha-windows-x64-123"}
         self.assertEqual("windows-x64", MESH.peer_platform(peer))
+
+    def test_exec_falls_back_to_poll_when_windows_returns_a_running_handle(self):
+        completed = {
+            "ok": True,
+            "found": True,
+            "state": "completed",
+            "record": {"exitCode": 0, "stdout": "done"},
+        }
+        with mock.patch.object(MESH, "route", return_value=completed) as routed, \
+             mock.patch.object(MESH.time, "sleep"):
+            result = MESH.wait_exec_result(
+                "https://mesh.example.test/rgw-a",
+                "lgw_windows",
+                {"ok": True, "running": True, "execId": "exec-1", "pollAfterMs": 250},
+                "upstream_local_peer",
+            )
+        self.assertEqual(completed, result)
+        routed.assert_called_once_with(
+            "https://mesh.example.test/rgw-a",
+            "lgw_windows",
+            "admin.system.exec.poll",
+            {"execId": "exec-1"},
+            "upstream_local_peer",
+        )
 
 
 if __name__ == "__main__":

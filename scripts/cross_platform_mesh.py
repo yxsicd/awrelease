@@ -385,6 +385,24 @@ def command_payload(marker: str, target_platform: str) -> tuple[str, list[str], 
     return "/bin/sh", ["-c", f"printf %s {marker}"], f"/tmp/{marker}.txt"
 
 
+def wait_exec_result(base: str, peer_id: str, executed: dict, decision: str,
+                     timeout: int = 20) -> dict:
+    if isinstance(executed.get("record"), dict):
+        return executed
+    exec_id = executed.get("execId")
+    if not executed.get("running") or not isinstance(exec_id, str) or not exec_id:
+        raise RuntimeError(f"exec returned neither a record nor a running handle for {peer_id}: {executed}")
+    deadline = time.monotonic() + timeout
+    latest = executed
+    while time.monotonic() < deadline:
+        delay_ms = latest.get("pollAfterMs", 250)
+        time.sleep(max(0.05, min(float(delay_ms) / 1000, 1.0)))
+        latest = route(base, peer_id, "admin.system.exec.poll", {"execId": exec_id}, decision)
+        if isinstance(latest.get("record"), dict):
+            return latest
+    raise RuntimeError(f"exec poll timed out for {peer_id}: {latest}")
+
+
 def verify_exec_and_file(base: str, peer: dict, marker: str, decision: str) -> int:
     peer_id = peer["id"]
     target_platform = peer_platform(peer)
@@ -393,6 +411,7 @@ def verify_exec_and_file(base: str, peer: dict, marker: str, decision: str) -> i
     command, args, file_path = command_payload(marker, target_platform)
     executed = route(base, peer_id, "admin.system.exec",
                      {"command": command, "args": args, "sync": True, "timeout": 10}, decision)
+    executed = wait_exec_result(base, peer_id, executed, decision)
     record = executed.get("record", {})
     if record.get("exitCode") != 0 or str(record.get("stdout", "")).strip() != marker:
         raise RuntimeError(f"exec mismatch for {peer_id}: {executed}")
