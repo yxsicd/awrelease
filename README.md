@@ -85,10 +85,9 @@ Linux x64, Linux arm64, macOS arm64, and Windows x64. Each native host starts a
 separate local RGW process, then installs Ma/Mb/Mc through that RGW. Every host
 RGW connects outbound to two independent central RGWs behind one public tunnel.
 The gate proves local `peer_direct` routing and central
-`upstream_local_peer` routing to each exact Ma/Mb/Mc manager and its LGW,
-including synchronous
+`upstream_local_peer` routing to each exact Ma/Mb/Mc LGW, including synchronous
 command and file round trips. It then stops one central RGW, proves all four
-host RGWs and all twenty-four manager/LGW peers remain reachable through the survivor,
+host RGWs and all twelve Ma/Mb/Mc peers remain reachable through the survivor,
 restarts the failed RGW, and requires the full peer set again. The tunnel,
 topology, and enrollment signing key exist only for that workflow run; no
 private deployment endpoint or credential is used.

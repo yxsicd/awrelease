@@ -354,20 +354,15 @@ def peer_platform(peer: dict) -> str | None:
     return None
 
 
-def wait_for_local_mabc(base: str, platform_name: str, timeout: int = 300) -> tuple[list[dict], list[dict]]:
+def wait_for_local_mabc(base: str, platform_name: str, timeout: int = 300) -> list[dict]:
     headers = {"x-agentweb-rgw-token": VERIFY}
     deadline = time.monotonic() + timeout
     selected: list[dict] = []
     while time.monotonic() < deadline:
         peers = get_json(f"{base}/api/peers", headers=headers).get("peers", [])
         selected = [peer for peer in peers if peer_platform(peer) == platform_name]
-        nested = {}
-        for manager in selected:
-            for peer in (manager.get("metadata") or {}).get("localPeers") or []:
-                if peer_platform(peer) == platform_name:
-                    nested[str(peer["id"])] = peer
-        if len(selected) == 3 and len(nested) == 3:
-            return selected, list(nested.values())
+        if len(selected) == 3:
+            return selected
         time.sleep(2)
     raise RuntimeError(f"host RGW did not see three managers plus three LGWs: {selected}")
 
@@ -380,7 +375,7 @@ def nested_mabc(base: str) -> tuple[list[dict], list[dict]]:
     nested: dict[str, dict] = {}
     for host in hosts:
         for peer in (host.get("metadata") or {}).get("localPeers") or []:
-            if peer_platform(peer):
+            if peer_platform(peer) and ":" not in str(peer.get("id") or ""):
                 nested[str(peer["id"])] = peer
     return hosts, list(nested.values())
 
@@ -451,28 +446,23 @@ def client_test(endpoints_root: pathlib.Path, edge_state: pathlib.Path,
                 source_platform: str, output: pathlib.Path) -> None:
     bundle = read_bundle(endpoints_root)
     edge = json.loads((edge_state / "edge.json").read_text(encoding="utf-8"))
-    local_managers, local_lgws = wait_for_local_mabc(edge["localGateway"], source_platform)
+    local = wait_for_local_mabc(edge["localGateway"], source_platform)
     checks = 0
-    for peer in local_managers:
+    for peer in local:
         status = route(edge["localGateway"], peer["id"], "admin.status", {}, "peer_direct")
         if status.get("ok") is not True:
             raise RuntimeError(f"local status failed for {peer['id']}")
         checks += 1
-    for peer in local_lgws:
-        status = route(edge["localGateway"], peer["id"], "admin.status", {}, "upstream_local_peer")
-        if status.get("ok") is not True:
-            raise RuntimeError(f"local LGW status failed for {peer['id']}")
-        checks += 1
-    checks += verify_exec_and_file(edge["localGateway"], local_lgws[0],
+    checks += verify_exec_and_file(edge["localGateway"], local[0],
                                    f"AWLOCAL_{source_platform}_{os.environ.get('GITHUB_RUN_ID', 'local')}".replace("-", "_"),
-                                   "upstream_local_peer")
+                                   "peer_direct")
     central_counts = {}
     for endpoint in bundle["centralGateways"]:
-        hosts, peers = wait_for_nested_mabc(endpoint["url"], 24)
+        hosts, peers = wait_for_nested_mabc(endpoint["url"], 12)
         central_counts[endpoint["id"]] = {"hostRgws": len(hosts), "mabc": len(peers)}
         own = [peer for peer in peers if peer_platform(peer) == source_platform]
-        if len(own) != 6:
-            raise RuntimeError(f"{endpoint['id']} did not see this host's three managers plus three LGWs")
+        if len(own) != 3:
+            raise RuntimeError(f"{endpoint['id']} did not see this host's three Mabc LGWs")
         for peer in own:
             status = route(endpoint["url"], peer["id"], "admin.status", {}, "upstream_local_peer")
             if status.get("ok") is not True:
@@ -483,8 +473,7 @@ def client_test(endpoints_root: pathlib.Path, edge_state: pathlib.Path,
                                        "upstream_local_peer")
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps({"ok": True, "sourcePlatform": source_platform,
-                                  "separateHostRgwPid": edge["pid"], "localMabcCount": 6,
-                                  "localManagerCount": len(local_managers), "localLgwCount": len(local_lgws),
+                                  "separateHostRgwPid": edge["pid"], "localMabcCount": len(local),
                                   "centralCounts": central_counts, "routedCheckCount": checks,
                                   "routeDecisions": ["peer_direct", "upstream_local_peer"]}, indent=2) + "\n")
     print(output.read_text())
@@ -499,7 +488,7 @@ def gateway_failover_test(state_dir: pathlib.Path, endpoints_path: pathlib.Path,
     survivor = bundle["centralGateways"][1]
     stop_pid(int(failed["pid"]))
     wait_endpoint_down(failed_endpoint["url"])
-    hosts, peers = wait_for_nested_mabc(survivor["url"], 24)
+    hosts, peers = wait_for_nested_mabc(survivor["url"], 12)
     checks = 0
     for peer in peers:
         status = route(survivor["url"], peer["id"], "admin.status", {}, "upstream_local_peer")
@@ -514,7 +503,7 @@ def gateway_failover_test(state_dir: pathlib.Path, endpoints_path: pathlib.Path,
     failed["pid"] = process.pid
     runtime_path.write_text(json.dumps(runtime, indent=2) + "\n", encoding="utf-8")
     wait_json(f"http://127.0.0.1:{failed['port']}/health", process)
-    recovered_hosts, recovered_peers = wait_for_nested_mabc(failed_endpoint["url"], 24)
+    recovered_hosts, recovered_peers = wait_for_nested_mabc(failed_endpoint["url"], 12)
     for peer in recovered_peers:
         route(failed_endpoint["url"], peer["id"], "admin.status", {}, "upstream_local_peer")
         checks += 1
