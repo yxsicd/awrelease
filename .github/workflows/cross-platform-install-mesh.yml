@@ -42,8 +42,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       CHANNEL: ${{ inputs.channel || 'prod' }}
-      MESH_STATE: ${{ runner.temp }}/mesh-gateway
-      MESH_ENDPOINTS: ${{ runner.temp }}/mesh-endpoints
     steps:
       - uses: actions/checkout@v7
       - name: Start this platform's ephemeral gateway
@@ -52,7 +50,7 @@ jobs:
           python scripts/cross_platform_mesh.py gateway-start
           --channel "$CHANNEL"
           --platform "${{ matrix.platform }}"
-          --state "$MESH_STATE"
+          --state "$RUNNER_TEMP/mesh-gateway"
       - name: Publish this platform's gateway endpoint
         uses: actions/upload-artifact@v7
         with:
@@ -66,15 +64,15 @@ jobs:
           for platform in linux-x64 linux-arm64 macos-arm64 windows-x64; do
             python scripts/github_artifact_bus.py wait-download \
               --name "mesh-gateway-${{ github.run_id }}-${platform}" \
-              --out "$MESH_ENDPOINTS/${platform}" \
+              --out "$RUNNER_TEMP/mesh-endpoints/${platform}" \
               --timeout 900
           done
       - name: Join this all-in-one gateway to the redundant set
         shell: bash
         run: >-
           python scripts/cross_platform_mesh.py gateway-configure
-          --state "$MESH_STATE"
-          --endpoints "$MESH_ENDPOINTS"
+          --state "$RUNNER_TEMP/mesh-gateway"
+          --endpoints "$RUNNER_TEMP/mesh-endpoints"
       - name: Publish gateway readiness
         uses: actions/upload-artifact@v7
         with:
@@ -115,7 +113,7 @@ jobs:
         shell: bash
         run: >-
           python scripts/cross_platform_mesh.py client-test
-          --endpoints "$MESH_ENDPOINTS"
+          --endpoints "$RUNNER_TEMP/mesh-endpoints"
           --platform "${{ matrix.platform }}"
           --output "${{ runner.temp }}/mesh-result/result.json"
       - name: Publish native client result
@@ -137,8 +135,8 @@ jobs:
         shell: bash
         run: >-
           python scripts/cross_platform_mesh.py gateway-failover-test
-          --state "$MESH_STATE"
-          --endpoints "$MESH_ENDPOINTS"
+          --state "$RUNNER_TEMP/mesh-gateway"
+          --endpoints "$RUNNER_TEMP/mesh-endpoints"
           --output "${{ runner.temp }}/mesh-failover/result.json"
       - name: Publish failover result
         if: matrix.platform == 'linux-x64'
