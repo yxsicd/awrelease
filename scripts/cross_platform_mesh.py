@@ -429,6 +429,19 @@ def verify_exec_and_file(base: str, peer: dict, marker: str, decision: str) -> i
     return 3
 
 
+def wait_endpoint_down(url: str, timeout: int = 45) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            status, _, body = request(f"{url}/health")
+            if status != 200 or json.loads(body).get("service") != "agentgw":
+                return
+        except Exception:
+            return
+        time.sleep(1)
+    raise RuntimeError(f"stopped central RGW remained healthy: {url}")
+
+
 def client_test(endpoints_root: pathlib.Path, edge_state: pathlib.Path,
                 source_platform: str, output: pathlib.Path) -> None:
     bundle = read_bundle(endpoints_root)
@@ -471,19 +484,19 @@ def gateway_failover_test(state_dir: pathlib.Path, endpoints_path: pathlib.Path,
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     bundle = read_bundle(endpoints_path)
     failed = runtime["centralGateways"][0]
+    failed_endpoint = bundle["centralGateways"][0]
     survivor = bundle["centralGateways"][1]
     stop_pid(int(failed["pid"]))
+    wait_endpoint_down(failed_endpoint["url"])
     hosts, peers = wait_for_nested_mabc(survivor["url"], 12)
     checks = 0
-    for platform_name in PLATFORMS:
-        peer = next(item for item in peers if peer_platform(item) == platform_name)
+    for peer in peers:
         status = route(survivor["url"], peer["id"], "admin.status", {}, "upstream_local_peer")
         if status.get("ok") is not True:
             raise RuntimeError(f"survivor status failed for {peer['id']}")
         checks += 1
     checks += verify_exec_and_file(survivor["url"], peers[0],
                                    f"AWFAILOVER_{os.environ.get('GITHUB_RUN_ID', 'local')}", "upstream_local_peer")
-    failed_endpoint = bundle["centralGateways"][0]
     directory = state_dir / failed["id"]
     env = json.loads((directory / "gateway-env.json").read_text(encoding="utf-8"))
     process = start_detached([runtime["binary"]], env, directory / "agentgw.log")
@@ -491,13 +504,13 @@ def gateway_failover_test(state_dir: pathlib.Path, endpoints_path: pathlib.Path,
     runtime_path.write_text(json.dumps(runtime, indent=2) + "\n", encoding="utf-8")
     wait_json(f"http://127.0.0.1:{failed['port']}/health", process)
     recovered_hosts, recovered_peers = wait_for_nested_mabc(failed_endpoint["url"], 12)
-    for platform_name in PLATFORMS:
-        peer = next(item for item in recovered_peers if peer_platform(item) == platform_name)
+    for peer in recovered_peers:
         route(failed_endpoint["url"], peer["id"], "admin.status", {}, "upstream_local_peer")
         checks += 1
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps({"ok": True, "failedCentralRgw": failed["id"],
                                   "survivingCentralRgw": survivor["id"],
+                                  "failedEndpointObservedDown": True,
                                   "hostRgwCountDuringFailure": len(hosts),
                                   "mabcCountDuringFailure": len(peers),
                                   "recoveredHostRgwCount": len(recovered_hosts),
