@@ -1,4 +1,4 @@
-name: AgentWeb cross-platform install mesh
+name: AgentWeb cross-platform redundant gateway mesh
 
 on:
   release:
@@ -23,43 +23,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  coordinator:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    env:
-      GITHUB_TOKEN: ${{ github.token }}
-      CHANNEL: ${{ inputs.channel || 'prod' }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Start ephemeral public RGW coordinator
-        run: |
-          python3 scripts/cross_platform_mesh.py coordinator-start \
-            --channel "$CHANNEL" \
-            --state "$RUNNER_TEMP/mesh-coordinator"
-      - name: Publish ephemeral mesh endpoint
-        uses: actions/upload-artifact@v7
-        with:
-          name: mesh-endpoint-${{ github.run_id }}
-          path: ${{ runner.temp }}/mesh-coordinator/endpoint.json
-          if-no-files-found: error
-          retention-days: 1
-      - name: Keep coordinator alive until every native client passes
-        run: |
-          python3 scripts/github_artifact_bus.py wait-count \
-            --prefix "mesh-result-${{ github.run_id }}-" \
-            --count 4 \
-            --timeout 1200
-      - name: Upload coordinator diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mesh-coordinator-${{ github.run_id }}
-          path: ${{ runner.temp }}/mesh-coordinator/*.log
-          if-no-files-found: warn
-          retention-days: 14
-
   native-install-and-mesh:
-    name: native install and mesh (${{ matrix.platform }})
+    name: native install and redundant mesh (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -73,45 +38,84 @@ jobs:
           - platform: windows-x64
             os: windows-2025
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       GITHUB_TOKEN: ${{ github.token }}
+      CHANNEL: ${{ inputs.channel || 'prod' }}
+      MESH_STATE: ${{ runner.temp }}/mesh-gateway
+      MESH_ENDPOINTS: ${{ runner.temp }}/mesh-endpoints
     steps:
       - uses: actions/checkout@v7
-      - name: Wait for the ephemeral RGW coordinator
+      - name: Start this platform's ephemeral gateway
         shell: bash
         run: >-
-          python scripts/github_artifact_bus.py wait-download
-          --name "mesh-endpoint-${{ github.run_id }}"
-          --out "${{ runner.temp }}/mesh-endpoint"
+          python scripts/cross_platform_mesh.py gateway-start
+          --channel "$CHANNEL"
+          --platform "${{ matrix.platform }}"
+          --state "$MESH_STATE"
+      - name: Publish this platform's gateway endpoint
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-gateway-${{ github.run_id }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/mesh-gateway/endpoint.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Download all four gateway endpoints
+        shell: bash
+        run: |
+          for platform in linux-x64 linux-arm64 macos-arm64 windows-x64; do
+            python scripts/github_artifact_bus.py wait-download \
+              --name "mesh-gateway-${{ github.run_id }}-${platform}" \
+              --out "$MESH_ENDPOINTS/${platform}" \
+              --timeout 900
+          done
+      - name: Join this all-in-one gateway to the redundant set
+        shell: bash
+        run: >-
+          python scripts/cross_platform_mesh.py gateway-configure
+          --state "$MESH_STATE"
+          --endpoints "$MESH_ENDPOINTS"
+      - name: Publish gateway readiness
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-ready-${{ github.run_id }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/mesh-gateway/endpoint.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for all redundant gateways
+        shell: bash
+        run: >-
+          python scripts/github_artifact_bus.py wait-count
+          --prefix "mesh-ready-${{ github.run_id }}-"
+          --count 4
           --timeout 900
-      - name: Install POSIX Mabc from the public release
+      - name: Install POSIX Mabc from this public gateway
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          gateway="$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/mesh-endpoint/endpoint.json"))["url"])')"
+          gateway="$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/mesh-gateway/endpoint.json"))["url"])')"
           AGENTWEB_HOME="${{ runner.temp }}/agentweb" \
             sh install.sh \
               --gateway "$gateway" \
               --device "gha-${{ matrix.platform }}-${{ github.run_id }}" \
               --profile production \
               --basic agentwebadmin
-      - name: Install Windows Mabc from the public release
+      - name: Install Windows Mabc from this public gateway
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $gateway = (Get-Content -Raw "${{ runner.temp }}/mesh-endpoint/endpoint.json" | ConvertFrom-Json).url
+          $gateway = (Get-Content -Raw "${{ runner.temp }}/mesh-gateway/endpoint.json" | ConvertFrom-Json).url
           & ./install.ps1 `
             -Gateway $gateway `
             -DeviceName "gha-${{ matrix.platform }}-${{ github.run_id }}" `
             -Profile production `
             -Basic agentwebadmin `
             -AgentWebHome "${{ runner.temp }}/agentweb"
-      - name: Exercise every platform from this platform
+      - name: Exercise every platform through every gateway
         shell: bash
         run: >-
           python scripts/cross_platform_mesh.py client-test
-          --endpoint "${{ runner.temp }}/mesh-endpoint/endpoint.json"
+          --endpoints "$MESH_ENDPOINTS"
           --platform "${{ matrix.platform }}"
           --output "${{ runner.temp }}/mesh-result/result.json"
       - name: Publish native client result
@@ -121,10 +125,41 @@ jobs:
           path: ${{ runner.temp }}/mesh-result/result.json
           if-no-files-found: error
           retention-days: 14
-      - name: Keep installed peers alive until every platform passes
+      - name: Keep every platform alive through baseline completion
         shell: bash
         run: >-
           python scripts/github_artifact_bus.py wait-count
           --prefix "mesh-result-${{ github.run_id }}-"
           --count 4
+          --timeout 1200
+      - name: Stop one gateway, route through a survivor, and recover it
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: >-
+          python scripts/cross_platform_mesh.py gateway-failover-test
+          --state "$MESH_STATE"
+          --endpoints "$MESH_ENDPOINTS"
+          --output "${{ runner.temp }}/mesh-failover/result.json"
+      - name: Publish failover result
+        if: matrix.platform == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-failover-${{ github.run_id }}
+          path: ${{ runner.temp }}/mesh-failover/result.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Keep every gateway alive through failover recovery
+        shell: bash
+        run: >-
+          python scripts/github_artifact_bus.py wait-download
+          --name "mesh-failover-${{ github.run_id }}"
+          --out "${{ runner.temp }}/mesh-failover-proof"
           --timeout 900
+      - name: Upload gateway diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-gateway-diagnostics-${{ github.run_id }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/mesh-gateway/*.log
+          if-no-files-found: warn
+          retention-days: 14
