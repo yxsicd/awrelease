@@ -66,16 +66,12 @@ jobs:
         include:
           - platform: linux-x64
             os: ubuntu-24.04
-            shell: bash
           - platform: linux-arm64
             os: ubuntu-24.04-arm
-            shell: bash
           - platform: macos-arm64
             os: macos-15
-            shell: bash
           - platform: windows-x64
             os: windows-2025
-            shell: pwsh
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     env:
@@ -83,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Wait for the ephemeral RGW coordinator
-        shell: ${{ matrix.shell }}
+        shell: bash
         run: >-
           python scripts/github_artifact_bus.py wait-download
           --name "mesh-endpoint-${{ github.run_id }}"
@@ -112,7 +108,7 @@ jobs:
             -Basic agentwebadmin `
             -AgentWebHome "${{ runner.temp }}/agentweb"
       - name: Exercise every platform from this platform
-        shell: ${{ matrix.shell }}
+        shell: bash
         run: >-
           python scripts/cross_platform_mesh.py client-test
           --endpoint "${{ runner.temp }}/mesh-endpoint/endpoint.json"
@@ -126,7 +122,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Keep installed peers alive until every platform passes
-        shell: ${{ matrix.shell }}
+        shell: bash
         run: >-
           python scripts/github_artifact_bus.py wait-count
           --prefix "mesh-result-${{ github.run_id }}-"
