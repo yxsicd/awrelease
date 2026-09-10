@@ -14,57 +14,65 @@ SPEC.loader.exec_module(MESH)
 
 
 class RedundantMeshTests(unittest.TestCase):
-    def endpoints(self):
-        return [
-            {"platform": item, "url": f"https://{item}.example.test", "channel": "prod"}
-            for item in MESH.PLATFORMS
-        ]
+    def bundle(self):
+        return {
+            "channel": "prod",
+            "centralGateways": [
+                {"id": name, "url": f"https://mesh.example.test/{name}"}
+                for name in MESH.CENTRAL_IDS
+            ],
+            "platforms": list(MESH.PLATFORMS),
+        }
 
-    def test_topology_authorizes_every_ephemeral_gateway(self):
+    def test_host_topology_enrolls_mabc_only_into_the_host_rgw(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "topology.json"
-            MESH.write_topology(path, self.endpoints())
+            MESH.write_host_topology(path, "linux-x64", "http://127.0.0.1:17888")
             topology = json.loads(path.read_text())
-        gateway_ids = [f"gha-{item}" for item in MESH.PLATFORMS]
-        self.assertEqual(gateway_ids, [item["id"] for item in topology["rgws"]])
-        self.assertEqual(gateway_ids, topology["registrationPolicies"][0]["publicGatewayIds"])
-        self.assertEqual([MESH.CLUSTER_ID], topology["registrationPolicies"][0]["gatewayClusterIds"])
-        self.assertTrue(all(item["wsUrl"].endswith("/ws?role=upstream") for item in topology["rgws"]))
+        self.assertEqual(["gha-host-linux-x64"], [item["id"] for item in topology["rgws"]])
+        self.assertEqual(
+            ["gha-host-linux-x64"],
+            topology["registrationPolicies"][0]["publicGatewayIds"],
+        )
+        self.assertEqual(
+            "ws://127.0.0.1:17888/ws?role=upstream",
+            topology["rgws"][0]["wsUrl"],
+        )
 
-    def test_all_in_one_environment_connects_every_surviving_gateway(self):
+    def test_host_rgw_is_a_separate_remote_process_with_two_upstreams(self):
         with tempfile.TemporaryDirectory() as directory:
-            state = pathlib.Path(directory)
-            endpoints = self.endpoints()
-            own = endpoints[0]
-            remote_gws = [
-                f"{item['url'].replace('https://', 'wss://', 1)}/ws?role=upstream"
-                for item in endpoints
-                if item != own
-            ]
             env = MESH.gateway_environment(
-                state, "prod", own["platform"], own["url"], 17888,
-                "all-in-one", remote_gws, "signed-token",
+                pathlib.Path(directory), "prod", "remote", 17888,
+                MESH.host_gateway_id("linux-x64"), "gha-host-linux-x64",
+                "http://127.0.0.1:17888",
+                ["wss://mesh.example.test/rgw-a/ws?role=upstream",
+                 "wss://mesh.example.test/rgw-b/ws?role=upstream"], True,
             )
-        self.assertEqual("all-in-one", env["AGENTGW_MODE"])
+        self.assertEqual("remote", env["AGENTGW_MODE"])
+        self.assertEqual("true", env["AGENTGW_REQUIRE_ENROLLMENT_TOKEN"])
         self.assertEqual("all", env["AGENTGW_UPSTREAM_MODE"])
-        self.assertEqual(3, len(env["AGENTGW_REMOTE_GWS"].split(",")))
-        self.assertEqual("signed-token", env["AGENTGW_ENROLLMENT_TOKEN"])
+        self.assertEqual(2, len(env["AGENTGW_REMOTE_GWS"].split(",")))
 
-    def test_endpoint_bundle_requires_all_four_platforms(self):
+    def test_endpoint_bundle_requires_two_central_rgws(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "endpoint.json").write_text(json.dumps({"gateways": self.endpoints()}))
-            self.assertEqual(list(MESH.PLATFORMS), [item["platform"] for item in MESH.read_endpoints(root)])
+            (root / "endpoint.json").write_text(json.dumps(self.bundle()))
+            parsed = MESH.read_bundle(root)
+        self.assertEqual(list(MESH.CENTRAL_IDS), [item["id"] for item in parsed["centralGateways"]])
 
-    def test_path_router_maps_one_public_origin_to_four_backends(self):
+    def test_path_router_maps_one_public_origin_to_two_central_backends(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "haproxy.cfg"
-            ports = {item: 18080 + index for index, item in enumerate(MESH.PLATFORMS)}
+            ports = {"rgw-a": 18080, "rgw-b": 18081}
             MESH.write_haproxy_config(path, 19000, ports)
             config = path.read_text()
-        for item in MESH.PLATFORMS:
-            self.assertIn(f"path_beg /{item}", config)
-            self.assertIn(f"127.0.0.1:{ports[item]}", config)
+        for gateway in MESH.CENTRAL_IDS:
+            self.assertIn(f"path_beg /{gateway}", config)
+            self.assertIn(f"127.0.0.1:{ports[gateway]}", config)
+
+    def test_nested_peer_platform_reads_transitive_advertisement(self):
+        peer = {"id": "lgw_x", "deviceName": "gha-windows-x64-123"}
+        self.assertEqual("windows-x64", MESH.peer_platform(peer))
 
 
 if __name__ == "__main__":

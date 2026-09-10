@@ -35,25 +35,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y haproxy
-      - name: Start four all-in-one gateways behind one public tunnel
+      - name: Start two independent central RGWs
         run: >-
-          python3 scripts/cross_platform_mesh.py gateway-cluster-start
+          python3 scripts/cross_platform_mesh.py central-start
           --channel "$CHANNEL"
           --state "$RUNNER_TEMP/mesh-coordinator"
-      - name: Publish redundant gateway endpoints
+      - name: Publish central RGW endpoints
         uses: actions/upload-artifact@v7
         with:
           name: mesh-endpoints-${{ github.run_id }}
           path: ${{ runner.temp }}/mesh-coordinator/endpoint.json
           if-no-files-found: error
           retention-days: 1
-      - name: Keep gateways alive until every native client passes
+      - name: Keep central RGWs alive until every native host passes
         run: >-
           python3 scripts/github_artifact_bus.py wait-count
           --prefix "mesh-result-${{ github.run_id }}-"
           --count 4
           --timeout 1200
-      - name: Stop one gateway, route through a survivor, and recover it
+      - name: Stop one central RGW, route through the survivor, and recover it
         run: >-
           python3 scripts/cross_platform_mesh.py gateway-failover-test
           --state "$RUNNER_TEMP/mesh-coordinator"
@@ -76,7 +76,7 @@ jobs:
           retention-days: 14
 
   native-install-and-mesh:
-    name: native install and redundant mesh (${{ matrix.platform }})
+    name: native host RGW plus Mabc (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -95,54 +95,71 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
-      - name: Wait for the redundant gateway set
+      - name: Wait for both central RGWs
         shell: bash
         run: >-
           python scripts/github_artifact_bus.py wait-download
           --name "mesh-endpoints-${{ github.run_id }}"
           --out "${{ runner.temp }}/mesh-endpoints"
           --timeout 900
-      - name: Install POSIX Mabc from this platform's gateway
+      - name: Start a distinct host-local RGW process
+        shell: bash
+        run: >-
+          python scripts/cross_platform_mesh.py edge-start
+          --endpoints "${{ runner.temp }}/mesh-endpoints/endpoint.json"
+          --state "${{ runner.temp }}/host-rgw"
+          --platform "${{ matrix.platform }}"
+      - name: Install POSIX Mabc through the host-local RGW
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          gateway="$(python3 -c 'import json; p="${{ matrix.platform }}"; print(next(x["url"] for x in json.load(open("${{ runner.temp }}/mesh-endpoints/endpoint.json"))["gateways"] if x["platform"] == p))')"
+          gateway="$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/host-rgw/edge.json"))["localGateway"])')"
           AGENTWEB_HOME="${{ runner.temp }}/agentweb" \
             sh install.sh \
               --gateway "$gateway" \
               --device "gha-${{ matrix.platform }}-${{ github.run_id }}" \
               --profile production \
               --basic agentwebadmin
-      - name: Install Windows Mabc from this platform's gateway
+      - name: Install Windows Mabc through the host-local RGW
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $bundle = Get-Content -Raw "${{ runner.temp }}/mesh-endpoints/endpoint.json" | ConvertFrom-Json
-          $gateway = ($bundle.gateways | Where-Object platform -eq '${{ matrix.platform }}').url
+          $edge = Get-Content -Raw "${{ runner.temp }}/host-rgw/edge.json" | ConvertFrom-Json
           & ./install.ps1 `
-            -Gateway $gateway `
+            -Gateway $edge.localGateway `
             -DeviceName "gha-${{ matrix.platform }}-${{ github.run_id }}" `
             -Profile production `
             -Basic agentwebadmin `
             -AgentWebHome "${{ runner.temp }}/agentweb"
-      - name: Exercise every platform through every gateway
+      - name: Exercise local and both central routing paths
         shell: bash
         run: >-
           python scripts/cross_platform_mesh.py client-test
           --endpoints "${{ runner.temp }}/mesh-endpoints/endpoint.json"
+          --edge-state "${{ runner.temp }}/host-rgw"
           --platform "${{ matrix.platform }}"
           --output "${{ runner.temp }}/mesh-result/result.json"
-      - name: Publish native client result
+      - name: Publish native host result
         uses: actions/upload-artifact@v7
         with:
           name: mesh-result-${{ github.run_id }}-${{ matrix.platform }}
           path: ${{ runner.temp }}/mesh-result/result.json
           if-no-files-found: error
           retention-days: 14
-      - name: Keep installed peers alive through failover recovery
+      - name: Keep the host RGW and Mabc alive through failover recovery
         shell: bash
         run: >-
           python scripts/github_artifact_bus.py wait-download
           --name "mesh-failover-${{ github.run_id }}"
           --out "${{ runner.temp }}/mesh-failover-proof"
           --timeout 900
+      - name: Upload host diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-host-diagnostics-${{ github.run_id }}-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/host-rgw/*.log
+            ${{ runner.temp }}/agentweb/logs/**
+          if-no-files-found: warn
+          retention-days: 14

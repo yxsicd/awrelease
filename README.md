@@ -81,14 +81,14 @@ inspection through RGW to every exact peer, then checks AWMCP read-only
 MCP business tool.
 
 The cross-platform install mesh additionally runs the real public installer on
-Linux x64, Linux arm64, macOS arm64, and Windows x64. The coordinator starts
-four ephemeral `all-in-one` LGW/RGWs behind one public tunnel, and all Ma/Mb/Mc
-installations connect to the four-GW set through outbound connections. Every runner routes status through
-every gateway to all twelve installed peers, plus synchronous command and file
-round-trip checks for every target platform. The gate then stops one RGW,
-proves its host's Ma/Mb/Mc remain reachable through a surviving RGW, restarts
-the failed RGW, and requires the complete peer set and exact
-`targetPeerId`/`routeDecision=peer_direct` evidence after recovery. The tunnels,
+Linux x64, Linux arm64, macOS arm64, and Windows x64. Each native host starts a
+separate local RGW process, then installs Ma/Mb/Mc through that RGW. Every host
+RGW connects outbound to two independent central RGWs behind one public tunnel.
+The gate proves local `peer_direct` routing and central
+`upstream_local_peer` routing to the exact Ma/Mb/Mc peer, including synchronous
+command and file round trips. It then stops one central RGW, proves all four
+host RGWs and all twelve Ma/Mb/Mc peers remain reachable through the survivor,
+restarts the failed RGW, and requires the full peer set again. The tunnel,
 topology, and enrollment signing key exist only for that workflow run; no
 private deployment endpoint or credential is used.
 
