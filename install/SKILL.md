@@ -9,7 +9,8 @@ metadata:
 # Install AgentWeb
 
 Prerequisites are `curl` or `wget`, a SHA-256 tool, and systemd on Linux or
-launchd on macOS.
+launchd on macOS. Windows x64 uses PowerShell 5.1 or newer and the current-user
+Task Scheduler or Startup folder.
 
 ## Obtain the one-time claim
 
@@ -51,6 +52,16 @@ curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
 Optional arguments include `--gateway`, `--device`, `--policy`, `--profile`,
 `--basic`, `--channel`, and `--home`. Explicit `--enroll` consumes a previously
 issued claim. `--device NAME --remote-gws URLS` remains the break-glass path.
+
+On Windows x64, use the public PowerShell installer:
+
+```powershell
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/yxsicd/awrelease/main/install.ps1'))) `
+  -Gateway 'https://gateway.example.com'
+```
+
+Its optional parameters are `-Gateway`, `-Enroll`, `-DeviceName`, `-Policy`,
+`-Profile`, `-Basic`, and `-AgentWebHome`.
 
 The installer consumes the claim, receives the signed parent enrollment token,
 and exchanges it for role-bound node tokens. It handles those tokens internally;

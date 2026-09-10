@@ -1,0 +1,134 @@
+name: AgentWeb cross-platform install mesh
+
+on:
+  release:
+    types: [published, edited]
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Public release channel to install
+        required: true
+        default: prod
+        type: choice
+        options: [main, prod]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: awrelease-cross-platform-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  coordinator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CHANNEL: ${{ inputs.channel || 'prod' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start ephemeral public RGW coordinator
+        run: |
+          python3 scripts/cross_platform_mesh.py coordinator-start \
+            --channel "$CHANNEL" \
+            --state "$RUNNER_TEMP/mesh-coordinator"
+      - name: Publish ephemeral mesh endpoint
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-endpoint-${{ github.run_id }}
+          path: ${{ runner.temp }}/mesh-coordinator/endpoint.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Keep coordinator alive until every native client passes
+        run: |
+          python3 scripts/github_artifact_bus.py wait-count \
+            --prefix "mesh-result-${{ github.run_id }}-" \
+            --count 4 \
+            --timeout 1200
+      - name: Upload coordinator diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-coordinator-${{ github.run_id }}
+          path: ${{ runner.temp }}/mesh-coordinator/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  native-install-and-mesh:
+    name: native install and mesh (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-24.04
+            shell: bash
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            shell: bash
+          - platform: macos-arm64
+            os: macos-15
+            shell: bash
+          - platform: windows-x64
+            os: windows-2025
+            shell: pwsh
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Wait for the ephemeral RGW coordinator
+        shell: ${{ matrix.shell }}
+        run: >-
+          python scripts/github_artifact_bus.py wait-download
+          --name "mesh-endpoint-${{ github.run_id }}"
+          --out "${{ runner.temp }}/mesh-endpoint"
+          --timeout 900
+      - name: Install POSIX Mabc from the public release
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          gateway="$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/mesh-endpoint/endpoint.json"))["url"])')"
+          AGENTWEB_HOME="${{ runner.temp }}/agentweb" \
+            sh install.sh \
+              --gateway "$gateway" \
+              --device "gha-${{ matrix.platform }}-${{ github.run_id }}" \
+              --profile production \
+              --basic agentwebadmin
+      - name: Install Windows Mabc from the public release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $gateway = (Get-Content -Raw "${{ runner.temp }}/mesh-endpoint/endpoint.json" | ConvertFrom-Json).url
+          & ./install.ps1 `
+            -Gateway $gateway `
+            -DeviceName "gha-${{ matrix.platform }}-${{ github.run_id }}" `
+            -Profile production `
+            -Basic agentwebadmin `
+            -AgentWebHome "${{ runner.temp }}/agentweb"
+      - name: Exercise every platform from this platform
+        shell: ${{ matrix.shell }}
+        run: >-
+          python scripts/cross_platform_mesh.py client-test
+          --endpoint "${{ runner.temp }}/mesh-endpoint/endpoint.json"
+          --platform "${{ matrix.platform }}"
+          --output "${{ runner.temp }}/mesh-result/result.json"
+      - name: Publish native client result
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-result-${{ github.run_id }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/mesh-result/result.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Keep installed peers alive until every platform passes
+        shell: ${{ matrix.shell }}
+        run: >-
+          python scripts/github_artifact_bus.py wait-count
+          --prefix "mesh-result-${{ github.run_id }}-"
+          --count 4
+          --timeout 900

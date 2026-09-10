@@ -21,6 +21,17 @@ service-qualified `agentgw-prod.json` manifest, verifies the selected binary's
 SHA-256, writes the AgentWeb manager profile, starts it with systemd or launchd,
 and checks local `/build-info` readiness.
 
+Windows x64 uses the matching public PowerShell installer:
+
+```powershell
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/yxsicd/awrelease/main/install.ps1'))) `
+  -Gateway 'https://gateway.example.com'
+```
+
+It performs the same claim, manifest, SHA-256, manager-profile, persistence, and
+readiness checks using LIMITED scheduled tasks with a current-user Startup
+shortcut fallback.
+
 Use `--gateway`, `--device`, `--policy`, `--profile`, or `--basic` when the
 deployment differs. The verify is one value shared by RGW HTTP, AWMCP tool
 calls, and Basic claim issuance. An upgraded gateway may advertise and retain
@@ -68,6 +79,15 @@ Ma/Mb/Mc, routes status, command execution, file round trips, and manager
 inspection through RGW to every exact peer, then checks AWMCP read-only
 `initialize`/`tools/list` and both Website Skills surfaces. It never invokes an
 MCP business tool.
+
+The cross-platform install mesh additionally runs the real public installer on
+Linux x64, Linux arm64, macOS arm64, and Windows x64. The four native runners
+join one ephemeral RGW through outbound connections. Every runner then routes
+status, synchronous command, and file round-trip checks to all twelve installed
+Ma/Mb/Mc peers and requires the exact `targetPeerId` plus
+`routeDecision=peer_direct`. The coordinator and enrollment signing key exist
+only for that workflow run; no private deployment endpoint or credential is
+used.
 
 Run the same black-box check locally on Linux amd64:
 

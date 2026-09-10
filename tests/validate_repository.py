@@ -20,8 +20,12 @@ assert descriptor["releaseChannels"]["default"] == "prod"
 assert descriptor["releaseChannels"]["order"] == ["dev", "main", "prod"]
 assert descriptor["discovery"]["runtimeEnrollmentDiscoveryPath"] == "/setup/api/bootstrap-info"
 
-for relative in ("README.md", "SKILL.md", "service.json", "skills.json", "install.sh"):
+for relative in ("README.md", "SKILL.md", "service.json", "skills.json", "install.sh", "install.ps1"):
     assert (root / relative).is_file(), relative
+assert descriptor["discovery"]["installers"] == {
+    "posix": "install.sh",
+    "windows": "install.ps1",
+}
 for entry in catalog["skills"]:
     skill = (root / entry["path"]).read_text()
     assert skill.startswith("---\n"), entry["path"]
@@ -54,5 +58,12 @@ assert "matrix:\n        channel: [main, prod]" in workflow
 smoke = (root / "scripts" / "release_smoke.py").read_text()
 for required in ("mabcPeers", "mabcRoutedCommandCount", '"manager.child.list"', '"admin.fs.write"'):
     assert required in smoke, required
+
+mesh_workflow = (root / ".github" / "workflows" / "cross-platform-install-mesh.yml").read_text()
+for required in ("ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "windows-2025", "install.ps1", "install.sh"):
+    assert required in mesh_workflow, required
+mesh = (root / "scripts" / "cross_platform_mesh.py").read_text()
+for required in ("linux-x64", "linux-arm64", "macos-arm64", "windows-x64", '"routeDecision"'):
+    assert required in mesh, required
 
 print("OK awrelease repository contract")

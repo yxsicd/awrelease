@@ -12,6 +12,10 @@
     "rootSkill": "SKILL.md",
     "catalog": "skills.json",
     "installer": "install.sh",
+    "installers": {
+      "posix": "install.sh",
+      "windows": "install.ps1"
+    },
     "runtimeEnrollmentDiscoveryPath": "/setup/api/bootstrap-info",
     "runtimeClaimEndpointSource": "bootstrap-info.enrollment.claimEndpoint"
   },
