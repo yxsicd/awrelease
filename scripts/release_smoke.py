@@ -447,6 +447,33 @@ def smoke_runtime_website_skills(base: str, discovery: dict) -> None:
             raise RuntimeError(f"runtime Website Skill is unavailable: {item['path']}")
 
 
+def validate_runtime_build(service: str, payload: dict, manifest: dict) -> None:
+    build = payload.get("build", {})
+    if (
+        payload.get("ok") is not True
+        or build.get("service") != service
+        or build.get("gitDirty") is not False
+        or build.get("gitSha") != manifest.get("gitSha")
+    ):
+        raise RuntimeError(f"released {service} runtime does not match its manifest")
+
+
+def validate_awmcp_readiness(payload: dict) -> None:
+    if (
+        payload.get("ok") is not True
+        or payload.get("service") != "awmcp"
+        or not isinstance(payload.get("readyCount"), int)
+        or payload["readyCount"] < 1
+    ):
+        raise RuntimeError("released AWMCP is not ready against the released AgentGW")
+
+
+def log_tail(handle, limit: int = 20_000) -> str:
+    handle.flush()
+    data = pathlib.Path(handle.name).read_bytes()
+    return data[-limit:].decode("utf-8", errors="replace")
+
+
 def stop(process: subprocess.Popen | None) -> None:
     if process is None or process.poll() is not None:
         return
@@ -534,8 +561,9 @@ def main() -> int:
             auth_headers = {"x-agentweb-rgw-token": verify}
             openapi = get_json(urllib.parse.urljoin(gateway_base, "api/v1/openapi.json"))
             openapi_operations = smoke_openapi(openapi)
-            if gateway_health.get("service") != "agentgw" or build_info["build"]["gitDirty"]:
-                raise RuntimeError("released AgentGW identity is not clean")
+            if gateway_health.get("service") != "agentgw":
+                raise RuntimeError("released AgentGW health identity is invalid")
+            validate_runtime_build("agentgw", build_info, manifests["agentgw"])
             if api_index.get("service") != "agentgw" or capabilities.get("ok") is not True:
                 raise RuntimeError("released AgentGW API index or capabilities are invalid")
             if topology.get("ok") is not True or not isinstance(topology.get("peers"), list):
@@ -654,8 +682,8 @@ def main() -> int:
                 raise RuntimeError(f"AWMCP kernel changed: {sorted(names)}")
             if initialized.get("protocolVersion") != MCP_VERSION:
                 raise RuntimeError("AWMCP negotiated an unexpected protocol version")
-            if mcp_ready.get("ready") is not True or mcp_build.get("build", {}).get("gitDirty") is not False:
-                raise RuntimeError("released AWMCP readiness or build identity is invalid")
+            validate_awmcp_readiness(mcp_ready)
+            validate_runtime_build("awmcp", mcp_build, manifests["awmcp"])
             mcp_evidence = smoke_mcp_tools(mcp_url, verify, role_ids["ma"])
 
             smoke_website_skills(root)
@@ -687,6 +715,22 @@ def main() -> int:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
             print(json.dumps(report, indent=2, sort_keys=True))
+        except Exception as exc:
+            output = pathlib.Path(args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            diagnostic = {
+                "schema": "agentweb.release-smoke.v1",
+                "ok": False,
+                "channel": args.channel,
+                "error": str(exc),
+                "logs": {
+                    "agentgw": log_tail(gateway_log),
+                    "awmcp": log_tail(mcp_log),
+                    "managers": [log_tail(handle) for handle in manager_logs],
+                },
+            }
+            output.write_text(json.dumps(diagnostic, indent=2, sort_keys=True) + "\n")
+            raise
         finally:
             stop(mcp)
             for manager in managers:

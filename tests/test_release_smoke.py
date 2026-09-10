@@ -12,6 +12,28 @@ SPEC.loader.exec_module(SMOKE)
 
 
 class PublicInterfaceCoverageTests(unittest.TestCase):
+    def test_runtime_identity_is_checked_against_each_service_manifest(self):
+        SMOKE.validate_runtime_build(
+            "awmcp",
+            {"ok": True, "build": {"service": "awmcp", "gitSha": "awmcp123", "gitDirty": False}},
+            {"gitSha": "awmcp123"},
+        )
+        with self.assertRaisesRegex(RuntimeError, "does not match its manifest"):
+            SMOKE.validate_runtime_build(
+                "awmcp",
+                {"ok": True, "build": {"service": "awmcp", "gitSha": "agentgw456", "gitDirty": False}},
+                {"gitSha": "awmcp123"},
+            )
+
+    def test_awmcp_readiness_uses_the_published_ok_schema(self):
+        SMOKE.validate_awmcp_readiness(
+            {"ok": True, "service": "awmcp", "readyCount": 1}
+        )
+        with self.assertRaisesRegex(RuntimeError, "is not ready"):
+            SMOKE.validate_awmcp_readiness(
+                {"ready": True, "service": "awmcp", "readyCount": 1}
+            )
+
     def openapi(self):
         return {
             "openapi": "3.1.0",
