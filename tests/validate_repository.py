@@ -53,6 +53,9 @@ assert "x86_64-pc-windows-gnu" in powershell_installer
 assert "x86_64-pc-windows-msvc" not in powershell_installer
 assert "function Get-AgentWebSetupBootstrap([Uri]$Origin)" in powershell_installer
 assert "$claimOrigin = [Uri]$claimUri.GetLeftPart" in powershell_installer
+assert "function Add-AgentWebNoCache([string]$Url)" in powershell_installer
+assert "Add-AgentWebNoCache $manifestUrl" in powershell_installer
+assert "Add-AgentWebNoCache ([string]$artifact.downloadUrl)" in powershell_installer
 
 source_installer = root.parent / "agentweb" / "agentgw" / "src" / "static" / "install.sh"
 if source_installer.is_file():

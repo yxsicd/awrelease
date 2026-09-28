@@ -81,16 +81,28 @@ function Get-AgentWebSetupBootstrap([Uri]$Origin) {
   return Invoke-RestMethod -Uri ([Uri]::new($Origin, $path)) -Method Get -Headers @{ 'Cache-Control' = 'no-cache' }
 }
 
+function Add-AgentWebNoCache([string]$Url) {
+  $builder = [UriBuilder]$Url
+  $cacheBust = [Uri]::EscapeDataString([guid]::NewGuid().ToString('N'))
+  $existing = $builder.Query.TrimStart('?')
+  $builder.Query = if ([string]::IsNullOrWhiteSpace($existing)) {
+    "agentweb_nocache=$cacheBust"
+  } else {
+    "$existing&agentweb_nocache=$cacheBust"
+  }
+  return $builder.Uri.AbsoluteUri
+}
+
 function Get-AgentWebReleasePackage([object]$SetupInfo) {
   $manifestUrl = [string]$SetupInfo.release.manifestUrl
   if ([string]::IsNullOrWhiteSpace($manifestUrl)) { Fail 'gateway bootstrap has no release manifest URL' }
-  $manifest = Invoke-RestMethod -Uri $manifestUrl -Method Get
+  $manifest = Invoke-RestMethod -Uri (Add-AgentWebNoCache $manifestUrl) -Method Get -Headers @{ 'Cache-Control' = 'no-cache' }
   $artifact = $manifest.artifacts.'windows-x64'
   if (-not $artifact.downloadUrl -or -not $artifact.sha256) { Fail 'release has no windows-x64 artifact' }
   if ([string]$artifact.target -ne 'x86_64-pc-windows-gnu') { Fail 'release windows-x64 target mismatch' }
   $download = Join-Path $env:TEMP "agentgw-preflight-$([guid]::NewGuid().ToString('N')).exe"
   Write-Host 'AgentWeb package preflight: downloading windows-x64 before consuming enrollment claim'
-  Invoke-WebRequest -UseBasicParsing -Uri $artifact.downloadUrl -OutFile $download
+  Invoke-WebRequest -UseBasicParsing -Uri (Add-AgentWebNoCache ([string]$artifact.downloadUrl)) -OutFile $download -Headers @{ 'Cache-Control' = 'no-cache' }
   $actual = (Get-FileHash -Algorithm SHA256 -Path $download).Hash.ToLowerInvariant()
   if ($actual -ne ([string]$artifact.sha256).ToLowerInvariant()) {
     Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
