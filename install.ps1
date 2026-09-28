@@ -75,6 +75,29 @@ function Set-AgentWebTaskSettings([string]$TaskName) {
   Set-ScheduledTask -TaskName $TaskName -Settings $settings | Out-Null
 }
 
+function Stop-AgentWebRoleProcess([string]$TaskName, [string]$Config) {
+  & schtasks.exe /End /TN $TaskName 2>$null | Out-Null
+  try {
+    $matches = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+      $_.CommandLine -and $_.CommandLine.IndexOf($Config, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+  } catch {
+    Fail "could not inspect the existing process for $TaskName before repair: $($_.Exception.Message)"
+  }
+  foreach ($process in $matches) {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+  }
+  $deadline = (Get-Date).AddSeconds(15)
+  do {
+    $remaining = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+      $_.CommandLine -and $_.CommandLine.IndexOf($Config, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+    if ($remaining.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+  Fail "existing process for $TaskName did not stop before repair"
+}
+
 function Get-AgentWebSetupBootstrap([Uri]$Origin) {
   $cacheBust = [Uri]::EscapeDataString([guid]::NewGuid().ToString('N'))
   $path = "/setup/api/bootstrap-info?cachebust=$cacheBust"
@@ -240,8 +263,13 @@ New-Item -ItemType Directory -Force -Path $binDir, $stateDir, $logDir, $tmpDir |
 $bin = Join-Path $binDir 'agentgw.exe'
 $download = [string]$PreparedPackage.Download
 $actual = [string]$PreparedPackage.Sha256
-if (Test-Path $bin) { Copy-Item $bin "$bin.bak.$(Get-Date -Format yyyyMMddHHmmss)" }
-Move-Item -Force $download $bin
+$releaseSuffix = $actual.Substring(0, 12)
+# Keep the historical path for callers that still inspect it, but never replace
+# a running Windows executable in place. Supervisors use independent,
+# versioned role binaries below.
+if (-not (Test-Path -LiteralPath $bin)) {
+  Copy-Item -LiteralPath $download -Destination $bin
+}
 
 $signedDeviceName = [string]$bootstrap.deviceName
 if ($signedDeviceName.Length -gt 128 -or $signedDeviceName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { Fail 'manifest deviceName is invalid' }
@@ -268,8 +296,15 @@ $upstreamTransport = if ($bootstrap.upstreamTransport) { [string]$bootstrap.upst
 $installRecords = @()
 foreach ($role in $roles) {
   $roleDir = Join-Path $InstallRoot $role.Name
+  $roleBinDir = Join-Path $roleDir 'bin'
+  $roleBin = Join-Path $roleBinDir "agentgw-$releaseSuffix.exe"
   $managerDir = Join-Path $stateDir "$($role.Name)\manager"
-  New-Item -ItemType Directory -Force -Path $roleDir, $managerDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $roleDir, $roleBinDir, $managerDir | Out-Null
+  if (-not (Test-Path -LiteralPath $roleBin)) {
+    Copy-Item -LiteralPath $download -Destination $roleBin
+  }
+  $roleBinSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $roleBin).Hash.ToLowerInvariant()
+  if ($roleBinSha -ne $actual) { Fail "role binary sha256 mismatch for $($role.Name)" }
   $nodeIdFile = Join-Path $roleDir 'agentgw-node-id'
   if (-not (Test-Path $nodeIdFile)) { Set-Content -NoNewline -Encoding ASCII $nodeIdFile (New-RuntimeId 'lgw') }
   $nodeId = ([string](Get-Content -Raw -LiteralPath $nodeIdFile)).Trim()
@@ -303,7 +338,7 @@ foreach ($role in $roles) {
     "AGENTGW_MANAGER_DIR=$(Quote-Env $managerDir)",
     'AGENTGW_MANAGER_CHILD_ENV_FILES=',
     "AGENTGW_DIST_DIR=$(Quote-Env (Join-Path $roleDir 'dist'))",
-    "AGENTGW_SELF_PATH=$(Quote-Env $bin)",
+    "AGENTGW_SELF_PATH=$(Quote-Env $roleBin)",
     'AGENTGW_NO_SETUP_BROWSER=true',
     'AGENTGW_LOG_FORMAT=json',
     'RUST_LOG=agentgw=info'
@@ -311,17 +346,23 @@ foreach ($role in $roles) {
 
   $taskPrefix = if ($IsNamedInstance) { "AgentWebAgentGW-$Instance" } else { 'AgentWebAgentGW' }
   $taskName = "$taskPrefix-$($role.Display)"
-  $taskCommand = "`"$bin`" --config-file `"$config`""
+  $taskCommand = "`"$roleBin`" --config-file `"$config`""
   $installRecords += [pscustomobject]@{
     TaskName = $taskName
     TaskCommand = $taskCommand
     Config = $config
+    Target = $roleBin
+    WorkingDirectory = $roleBinDir
     Shortcut = (Join-Path $startupDir "$taskName.lnk")
   }
 }
+Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
 
 $persistenceMode = 'scheduled-task-limited'
 $createdTasks = @()
+foreach ($record in $installRecords) {
+  Stop-AgentWebRoleProcess -TaskName $record.TaskName -Config $record.Config
+}
 foreach ($record in $installRecords) {
   Remove-Item -LiteralPath $record.Shortcut -Force -ErrorAction SilentlyContinue
   & schtasks.exe /Create /F /SC ONLOGON /RL LIMITED /TN $record.TaskName /TR $record.TaskCommand 2>$null | Out-Null
@@ -349,7 +390,7 @@ if ($persistenceMode -eq 'startup-shortcut') {
   $createdShortcuts = @()
   foreach ($record in $installRecords) {
     try {
-      New-StartupShortcut -Path $record.Shortcut -Target $bin -Config $record.Config
+      New-StartupShortcut -Path $record.Shortcut -Target $record.Target -Config $record.Config
       $createdShortcuts += $record.Shortcut
     } catch {
       foreach ($shortcutPath in $createdShortcuts) {
@@ -361,7 +402,7 @@ if ($persistenceMode -eq 'startup-shortcut') {
   Write-Host 'AgentWeb install: LIMITED scheduled tasks unavailable; using current-user Startup shortcuts'
   foreach ($record in $installRecords) {
     $startArguments = "--config-file `"$($record.Config)`""
-    Start-Process -FilePath $bin -ArgumentList $startArguments -WorkingDirectory $binDir -WindowStyle Hidden | Out-Null
+    Start-Process -FilePath $record.Target -ArgumentList $startArguments -WorkingDirectory $record.WorkingDirectory -WindowStyle Hidden | Out-Null
   }
 } else {
   foreach ($record in $installRecords) {

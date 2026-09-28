@@ -8,6 +8,8 @@ and install only checksum-verified release bytes.
 `install.sh` and `install.ps1` are the installer source of truth. AgentWeb
 gateways reference these public scripts directly; script-only repairs are
 published here and do not require rebuilding the AgentGW binary.
+On Windows, repair stages versioned, SHA-verified role-local binaries instead
+of trying to overwrite an executable that a running manager has locked.
 
 ## Install an AgentWeb node
 

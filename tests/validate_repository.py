@@ -60,6 +60,11 @@ assert "$claimOrigin = [Uri]$claimUri.GetLeftPart" in powershell_installer
 assert "function Add-AgentWebNoCache([string]$Url)" in powershell_installer
 assert "Add-AgentWebNoCache $manifestUrl" in powershell_installer
 assert "Add-AgentWebNoCache ([string]$artifact.downloadUrl)" in powershell_installer
+assert "function Stop-AgentWebRoleProcess([string]$TaskName, [string]$Config)" in powershell_installer
+assert 'Join-Path $roleBinDir "agentgw-$releaseSuffix.exe"' in powershell_installer
+assert "AGENTGW_SELF_PATH=$(Quote-Env $roleBin)" in powershell_installer
+assert "Move-Item -Force $download $bin" not in powershell_installer
+assert "-Target $record.Target" in powershell_installer
 
 source_installer = root.parent / "agentweb" / "agentgw" / "src" / "static" / "install.sh"
 if source_installer.is_file():

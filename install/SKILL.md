@@ -14,6 +14,11 @@ raw `awrelease/main` installer URLs and keep any gateway-local `/install.sh` or
 is released by updating this repository; never rebuild AgentGW merely to change
 installer logic. The Windows release target is the manifest-authoritative
 `x86_64-pc-windows-gnu` target produced by the public release workflow.
+Windows repair must never overwrite a running shared `bin/agentgw.exe` in
+place. Materialize a SHA-verified, versioned binary independently under every
+role directory, point that role's supervisor and `AGENTGW_SELF_PATH` at its own
+copy, stop only the process associated with that exact role config, then
+activate in Mb, Mc, Ma order. The historical shared path is compatibility-only.
 
 Prerequisites are `curl` or `wget`, a SHA-256 tool, and systemd on Linux or
 launchd on macOS. Windows x64 uses PowerShell 5.1 or newer and the current-user
