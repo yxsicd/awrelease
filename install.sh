@@ -70,9 +70,9 @@ valid_enrollment_device_name() {
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: install.sh --enroll CLAIM_URL [--home PATH]
-       install.sh [--gateway URL] [--device NAME] [--policy ID] [--profile production|dv] [--basic VERIFY]
-       install.sh --device NAME --remote-gws URLS [--channel dev|main|prod] [--home PATH]
+Usage: install.sh --enroll CLAIM_URL [--home PATH] [--instance NAME]
+       install.sh [--gateway URL] [--device NAME] [--policy ID] [--profile production|dv] [--verify VERIFY] [--instance NAME]
+       install.sh --device NAME --remote-gws URLS [--channel dev|main|prod] [--home PATH] [--instance NAME]
 
 Environment variables:
   AGENTWEB_DEVICE_NAME   Stable topology device name. Prefer this over hostname.
@@ -80,7 +80,8 @@ Environment variables:
   AGENTWEB_SETUP_GATEWAY Required claim issuer origin when --gateway is omitted.
   AGENTWEB_SETUP_POLICY  Registration policy, default personal-default.
   AGENTWEB_SETUP_PROFILE Manager profile, default production.
-  AGENTWEB_VERIFY         Shared RGW/MCP/Basic verify, default agentwebadmin.
+  AGENTWEB_VERIFY         Shared gateway-access/runtime verify, default agentwebadmin.
+  AGENTWEB_INSTANCE       Optional named instance. Unset or "default" preserves the legacy layout.
   AGENTWEB_CHANNEL       Release channel, default prod.
   AGENTWEB_HOME          Install root, default ${HOME}/.agentweb.
   AGENTWEB_REMOTE_GWS    Explicit break-glass upstream URLs; never supplied by the public package.
@@ -118,6 +119,16 @@ while [ "$#" -gt 0 ]; do
     --basic)
       [ "$#" -ge 2 ] || fail "--basic requires a value"
       AGENTWEB_VERIFY="$2"
+      shift 2
+      ;;
+    --verify)
+      [ "$#" -ge 2 ] || fail "--verify requires a value"
+      AGENTWEB_VERIFY="$2"
+      shift 2
+      ;;
+    --instance)
+      [ "$#" -ge 2 ] || fail "--instance requires a value"
+      AGENTWEB_INSTANCE="$2"
       shift 2
       ;;
     --channel)
@@ -229,9 +240,9 @@ new_runtime_id() {
 os="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m 2>/dev/null | tr '[:upper:]' '[:lower:]')"
 case "$os:$arch" in
-  linux:x86_64|linux:amd64) artifact_key="linux-x64-musl" ;;
-  linux:aarch64|linux:arm64) artifact_key="linux-arm64-musl" ;;
-  darwin:arm64|darwin:aarch64) artifact_key="macos-arm64" ;;
+  linux:x86_64|linux:amd64) artifact_key="linux-x64-musl"; expected_target="x86_64-unknown-linux-musl" ;;
+  linux:aarch64|linux:arm64) artifact_key="linux-arm64-musl"; expected_target="aarch64-unknown-linux-musl" ;;
+  darwin:arm64|darwin:aarch64) artifact_key="macos-arm64"; expected_target="aarch64-apple-darwin" ;;
   darwin:x86_64|darwin:amd64) fail "macOS x86_64 is not published in the prod channel yet" ;;
   *) fail "unsupported platform: $(uname -s 2>/dev/null || echo unknown) $(uname -m 2>/dev/null || echo unknown)" ;;
 esac
@@ -241,7 +252,25 @@ need_cmd sed
 
 channel="${AGENTWEB_CHANNEL:-prod}"
 repo="${AGENTWEB_RELEASE_REPO:-yxsicd/awrelease}"
+gateway_verify="${AGENTWEB_VERIFY:-agentwebadmin}"
+case "$gateway_verify" in
+  ""|*[!A-Za-z0-9._-]*) fail "--verify contains unsupported characters" ;;
+esac
+[ "${#gateway_verify}" -le 128 ] || fail "--verify is too long"
 agentweb_home="${AGENTWEB_HOME:-${HOME}/.agentweb}"
+instance_name="${AGENTWEB_INSTANCE:-}"
+if [ "$instance_name" = "default" ]; then
+  instance_name=""
+fi
+if [ -n "$instance_name" ]; then
+  case "$instance_name" in
+    *[!A-Za-z0-9._-]*) fail "--instance contains unsupported characters" ;;
+  esac
+  [ "${#instance_name}" -le 64 ] || fail "--instance is too long"
+  install_root="${agentweb_home}/instances/${instance_name}"
+else
+  install_root="${agentweb_home}"
+fi
 upstream_proxy="${AGENTGW_UPSTREAM_PROXY:-}"
 if [ -z "$upstream_proxy" ]; then
   for proxy_candidate in \
@@ -270,16 +299,69 @@ if [ -n "$upstream_proxy" ]; then
     *[!A-Za-z0-9._~:/@%+=-]*) fail "percent-encode special characters in the inherited upstream proxy" ;;
   esac
 fi
-bin_dir="${agentweb_home}/bin"
-env_dir="${agentweb_home}/env.d"
-state_dir="${agentweb_home}/state"
-log_dir="${agentweb_home}/logs"
-tmp_dir="${agentweb_home}/tmp"
+bin_dir="${install_root}/bin"
+env_dir="${install_root}/env.d"
+state_dir="${install_root}/state"
+log_dir="${install_root}/logs"
+tmp_dir="${install_root}/tmp"
 bin_path="${bin_dir}/agentgw"
 manifest_path="${tmp_dir}/${channel}.json"
 bootstrap_path="${tmp_dir}/bootstrap.$$.json"
 
 mkdir -p "$bin_dir" "$env_dir" "$state_dir" "$log_dir" "$tmp_dir"
+
+install_state="new"
+existing_device=""
+for existing_env in \
+  "${install_root}/ma/config.env" \
+  "${install_root}/mb/config.env" \
+  "${install_root}/mc/config.env" \
+  "${install_root}/md/config.env" \
+  "${env_dir}"/*.env
+do
+  [ -f "$existing_env" ] || continue
+  candidate_device="$(sed -n 's/^AGENTGW_DEVICE_NAME=//p' "$existing_env" | head -1 | tr -d '"' || true)"
+  [ -n "$candidate_device" ] || continue
+  if [ -n "$existing_device" ] && [ "$existing_device" != "$candidate_device" ]; then
+    fail "existing role configs disagree on Device Name (${existing_device} != ${candidate_device})"
+  fi
+  existing_device="$candidate_device"
+  install_state="repair"
+done
+if [ -e "$bin_path" ]; then
+  install_state="repair"
+fi
+if [ -n "$existing_device" ] && [ -n "${AGENTWEB_DEVICE_NAME:-}" ] && [ "$existing_device" != "$AGENTWEB_DEVICE_NAME" ]; then
+  fail "existing node Device Name ${existing_device} does not match requested ${AGENTWEB_DEVICE_NAME}; refusing to overwrite another node"
+fi
+if [ "$install_state" = "repair" ]; then
+  log "AgentWeb repair: existing installation detected; preserving device and role node identities"
+fi
+
+prepared_bin=""
+prepared_manifest_url=""
+prepared_sha=""
+
+prepare_release_artifact() {
+  release_manifest_url="$1"
+  [ -n "$release_manifest_url" ] || fail "gateway bootstrap has no release manifest URL"
+  download "$release_manifest_url" "$manifest_path"
+  download_url="$(json_value_for_artifact "$artifact_key" downloadUrl "$manifest_path" || true)"
+  expected_sha="$(json_value_for_artifact "$artifact_key" sha256 "$manifest_path" || true)"
+  artifact_target="$(json_value_for_artifact "$artifact_key" target "$manifest_path" || true)"
+  [ -n "$download_url" ] || fail "manifest does not contain downloadUrl for ${artifact_key}: ${release_manifest_url}"
+  [ -n "$expected_sha" ] || fail "manifest does not contain sha256 for ${artifact_key}: ${release_manifest_url}"
+  [ "$artifact_target" = "$expected_target" ] || fail "manifest target mismatch for ${artifact_key}: expected ${expected_target}, got ${artifact_target:-missing}"
+  prepared_bin="${tmp_dir}/agentgw.${artifact_key}.$$"
+  rm -f "$prepared_bin"
+  log "AgentWeb package preflight: downloading ${artifact_key} before consuming enrollment claim"
+  download "$download_url" "$prepared_bin"
+  actual_sha="$(sha256_file "$prepared_bin")"
+  [ "$actual_sha" = "$expected_sha" ] || fail "sha256 mismatch for ${download_url}: expected ${expected_sha}, got ${actual_sha}"
+  chmod 0755 "$prepared_bin"
+  prepared_manifest_url="$release_manifest_url"
+  prepared_sha="$actual_sha"
+}
 
 default_device="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo agentweb-node)"
 
@@ -308,7 +390,7 @@ if [ -z "${AGENTWEB_ENROLL_URL:-}" ] && [ -z "${AGENTWEB_REMOTE_GWS:-}" ]; then
   setup_info="${tmp_dir}/setup-info.$$.json"
   claim_request="${tmp_dir}/claim-request.$$.json"
   claim_response="${tmp_dir}/claim-response.$$.json"
-  basic_config="${tmp_dir}/claim-basic.$$.curl"
+  access_config="${tmp_dir}/gateway-access.$$.curl"
   download "${setup_gateway}/setup/api/bootstrap-info" "$setup_info"
   [ "$(json_value enrollment.configured "$setup_info" || true)" = "true" ] || fail "gateway enrollment is not configured"
   claim_endpoint="$(json_value enrollment.claimEndpoint "$setup_info" || true)"
@@ -321,30 +403,21 @@ if [ -z "${AGENTWEB_ENROLL_URL:-}" ] && [ -z "${AGENTWEB_REMOTE_GWS:-}" ]; then
     *,"${setup_policy}",*) ;;
     *) fail "gateway does not advertise registration policy ${setup_policy}" ;;
   esac
-  setup_basic_username="$(json_value enrollment.claimAuthentication.username "$setup_info" || true)"
-  [ "$setup_basic_username" = "agentweb" ] || fail "gateway does not advertise the supported setup Basic username"
-  setup_basic_verify="${AGENTWEB_VERIFY:-}"
-  if [ -z "$setup_basic_verify" ]; then
-    setup_basic_verify="$(json_value enrollment.claimAuthentication.defaultVerify "$setup_info" || true)"
-  fi
-  [ -n "$setup_basic_verify" ] || fail "gateway uses a custom verify; provide it with --basic"
-  case "$setup_basic_verify" in
-    ""|*[!A-Za-z0-9._-]*) fail "--basic contains unsupported characters" ;;
-  esac
-  [ "${#setup_basic_verify}" -le 128 ] || fail "--basic is too long"
-
+  setup_manifest_url="$(json_value release.manifestUrl "$setup_info" || true)"
+  prepare_release_artifact "$setup_manifest_url"
   printf '{"deviceName":"%s","registrationPolicyId":"%s","profile":"%s"}\n' \
     "$requested_device" "$setup_policy" "$setup_profile" >"$claim_request"
-  printf 'user = "%s:%s"\n' "$setup_basic_username" "$setup_basic_verify" >"$basic_config"
+  # This Authorization value admits curl through the gateway entrypoint. The
+  # claim handler does not interpret it as a second enrollment authorization.
+  printf 'user = "agentweb:%s"\n' "$gateway_verify" >"$access_config"
   log "AgentWeb enrollment: requesting a one-time claim from ${setup_gateway}"
-  claim_status="$(curl --config "$basic_config" -sS -o "$claim_response" -w '%{http_code}' \
+  claim_status="$(curl --config "$access_config" -sS -o "$claim_response" -w '%{http_code}' \
     -H 'content-type: application/json' --data-binary "@$claim_request" \
     "${setup_gateway}${claim_endpoint}")"
-  rm -f "$basic_config" "$claim_request"
-  setup_basic_verify=""
+  rm -f "$access_config" "$claim_request"
   [ "$claim_status" = "201" ] || {
     rm -f "$claim_response" "$setup_info"
-    fail "claim request failed with HTTP ${claim_status}; provide the configured value with --basic"
+    fail "claim request failed with HTTP ${claim_status}; verify gateway access and --verify"
   }
   [ "$(json_value ok "$claim_response" || true)" = "true" ] || fail "gateway rejected the claim request"
   AGENTWEB_ENROLL_URL="$(json_value claimUrl "$claim_response" || true)"
@@ -352,10 +425,20 @@ if [ -z "${AGENTWEB_ENROLL_URL:-}" ] && [ -z "${AGENTWEB_REMOTE_GWS:-}" ]; then
   [ -n "$AGENTWEB_ENROLL_URL" ] || fail "gateway claim response has no claimUrl"
 fi
 
-enrollment_token=""
-node_token_endpoint=""
+if [ -n "${AGENTWEB_ENROLL_URL:-}" ] && [ -z "$prepared_bin" ]; then
+  claim_origin="$(printf '%s' "$AGENTWEB_ENROLL_URL" | sed -n 's#^\(https\{0,1\}://[^/]*\)/.*#\1#p')"
+  [ -n "$claim_origin" ] || fail "--enroll must be an http:// or https:// claim URL"
+  case "$claim_origin" in
+    *[[:space:]\"\']*) fail "--enroll origin contains unsupported characters" ;;
+  esac
+  setup_info="${tmp_dir}/setup-info.$$.json"
+  download "${claim_origin}/setup/api/bootstrap-info" "$setup_info"
+  setup_manifest_url="$(json_value release.manifestUrl "$setup_info" || true)"
+  rm -f "$setup_info"
+  prepare_release_artifact "$setup_manifest_url"
+fi
+
 upstream_transport="auto"
-upstream_http_token=""
 management_domain_id=""
 registration_policy_id=""
 install_profile="production"
@@ -373,25 +456,31 @@ if [ -n "${AGENTWEB_ENROLL_URL:-}" ]; then
   fi
   AGENTWEB_DEVICE_NAME="$claim_device"
   remote_gws="$(json_array_csv remoteGws "$bootstrap_path" || true)"
-  enrollment_token="$(json_value enrollmentToken "$bootstrap_path" || true)"
-  node_token_endpoint="$(json_value nodeTokenEndpoint "$bootstrap_path" || true)"
   upstream_transport="$(json_value upstreamTransport "$bootstrap_path" || true)"
-  upstream_http_token="$(json_value upstreamHttpToken "$bootstrap_path" || true)"
   management_domain_id="$(json_value managementDomainId "$bootstrap_path" || true)"
   registration_policy_id="$(json_value registrationPolicyId "$bootstrap_path" || true)"
   install_profile="$(json_value profile "$bootstrap_path" || true)"
+  claim_gateway_verify="$(json_value gatewayVerify "$bootstrap_path" || true)"
   claim_channel="$(json_value release.channel "$bootstrap_path" || true)"
   claim_manifest_url="$(json_value release.manifestUrl "$bootstrap_path" || true)"
   [ -n "$remote_gws" ] || fail "bootstrap manifest has no remoteGws"
-  [ -n "$enrollment_token" ] || fail "bootstrap manifest has no enrollmentToken"
   [ -z "$upstream_transport" ] || [ "$upstream_transport" = "auto" ] || fail "unsupported bootstrap upstreamTransport"
-  [ -z "$upstream_http_token" ] || [ "${#upstream_http_token}" -ge 32 ] || fail "bootstrap upstreamHttpToken is too short"
   upstream_transport="${upstream_transport:-auto}"
   [ -n "$management_domain_id" ] || fail "bootstrap manifest has no managementDomainId"
   [ -n "$registration_policy_id" ] || fail "bootstrap manifest has no registrationPolicyId"
   [ "$install_profile" = "production" ] || [ "$install_profile" = "dv" ] || fail "unsupported bootstrap profile: $install_profile"
+  [ -n "$claim_gateway_verify" ] || fail "bootstrap manifest has no gatewayVerify"
+  case "$claim_gateway_verify" in
+    *[!A-Za-z0-9._-]*) fail "bootstrap manifest has an invalid gatewayVerify" ;;
+  esac
+  [ "${#claim_gateway_verify}" -le 128 ] || fail "bootstrap manifest gatewayVerify is too long"
+  gateway_verify="$claim_gateway_verify"
+  claim_gateway_verify=""
   [ -z "$claim_channel" ] || channel="$claim_channel"
   manifest_url="${AGENTWEB_MANIFEST_URL:-$claim_manifest_url}"
+  if [ -n "$prepared_manifest_url" ] && [ "$manifest_url" != "$prepared_manifest_url" ]; then
+    fail "signed bootstrap release manifest differs from the package preflight"
+  fi
   rm -f "$bootstrap_path"
 else
   remote_gws="${AGENTWEB_REMOTE_GWS:-}"
@@ -399,44 +488,34 @@ else
   manifest_url="${AGENTWEB_MANIFEST_URL:-https://github.com/${repo}/releases/download/${channel}/agentgw-${channel}.json}"
 fi
 [ -n "$manifest_url" ] || fail "bootstrap manifest has no release manifest URL"
-
-existing_device=""
-if [ -z "${AGENTWEB_DEVICE_NAME:-}" ]; then
-  for existing_env in \
-    "${agentweb_home}/ma/config.env" \
-    "${agentweb_home}/mb/config.env" \
-    "${agentweb_home}/mc/config.env" \
-    "${agentweb_home}/env.d"/*.env
-  do
-    [ -f "$existing_env" ] || continue
-    existing_device="$(sed -n 's/^AGENTGW_DEVICE_NAME=//p' "$existing_env" | head -1 | tr -d '"' || true)"
-    [ -n "$existing_device" ] && break
-  done
-fi
 if [ -n "${AGENTWEB_ENROLL_URL:-}" ]; then
   device_name="$AGENTWEB_DEVICE_NAME"
+elif [ -n "${AGENTWEB_DEVICE_NAME:-}" ]; then
+  valid_enrollment_device_name "$AGENTWEB_DEVICE_NAME" || fail "--device contains unsupported enrollment identity characters"
+  device_name="$AGENTWEB_DEVICE_NAME"
+elif [ -n "$existing_device" ]; then
+  device_name="$existing_device"
 else
-  device_name="$(sanitize_name "${AGENTWEB_DEVICE_NAME:-${existing_device:-$default_device}}")"
+  device_name="$(sanitize_name "$default_device")"
 fi
 [ -n "$device_name" ] || device_name="agentweb_node"
+if [ -n "$existing_device" ] && [ "$existing_device" != "$device_name" ]; then
+  fail "signed Device Name ${device_name} does not match existing node ${existing_device}; refusing to overwrite another node"
+fi
+service_device_name="$device_name"
+if [ -n "$instance_name" ]; then
+  service_device_name="${device_name}-${instance_name}"
+fi
 
 log "AgentWeb install: channel=${channel} platform=${os}/${arch} artifact=${artifact_key}"
-download "$manifest_url" "$manifest_path"
-
-download_url="$(json_value_for_artifact "$artifact_key" downloadUrl "$manifest_path" || true)"
-expected_sha="$(json_value_for_artifact "$artifact_key" sha256 "$manifest_path" || true)"
-[ -n "$download_url" ] || fail "manifest does not contain downloadUrl for ${artifact_key}: ${manifest_url}"
-[ -n "$expected_sha" ] || fail "manifest does not contain sha256 for ${artifact_key}: ${manifest_url}"
-
-new_bin="${tmp_dir}/agentgw.${artifact_key}.$$"
-download "$download_url" "$new_bin"
-actual_sha="$(sha256_file "$new_bin")"
-[ "$actual_sha" = "$expected_sha" ] || fail "sha256 mismatch for ${download_url}: expected ${expected_sha}, got ${actual_sha}"
-chmod 0755 "$new_bin"
+if [ -z "$prepared_bin" ]; then
+  prepare_release_artifact "$manifest_url"
+fi
+actual_sha="$prepared_sha"
 if [ -x "$bin_path" ]; then
   cp -p "$bin_path" "${bin_path}.bak.$(date -u +%Y%m%d%H%M%S)"
 fi
-mv "$new_bin" "$bin_path"
+mv "$prepared_bin" "$bin_path"
 chmod 0755 "$bin_path"
 if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
   codesign --force --sign - "$bin_path" >/dev/null 2>&1 || fail "macOS codesign failed for ${bin_path}"
@@ -449,8 +528,17 @@ write_env() {
   bind="$4"
   browser="$5"
   display="$6"
-  role_dir="${agentweb_home}/${role}"
-  mkdir -p "$role_dir" "${state_dir}/${role}" "${role_dir}/dist"
+  role_dir="${install_root}/${role}"
+  role_bin_dir="${role_dir}/bin"
+  role_bin_path="${role_bin_dir}/agentgw"
+  mkdir -p "$role_dir" "$role_bin_dir" "${state_dir}/${role}" "${role_dir}/dist"
+  role_bin_incoming="${role_bin_path}.incoming.$$"
+  cp "$bin_path" "$role_bin_incoming"
+  chmod 0755 "$role_bin_incoming"
+  if [ -x "$role_bin_path" ]; then
+    cp -p "$role_bin_path" "${role_bin_path}.bak.$(date -u +%Y%m%d%H%M%S)"
+  fi
+  mv -f "$role_bin_incoming" "$role_bin_path"
   if [ ! -s "${role_dir}/node-id" ]; then
     new_runtime_id lgw >"${role_dir}/node-id"
   fi
@@ -458,34 +546,9 @@ write_env() {
     new_runtime_id dev >"${agentweb_home}/device-id"
   fi
   node_id="$(tr -d '\r\n' <"${role_dir}/node-id")"
-  role_enrollment_token="$enrollment_token"
-  if [ -n "$node_token_endpoint" ]; then
-    token_request="${tmp_dir}/node-token-${role}.$$.json"
-    token_response="${tmp_dir}/node-token-${role}.$$.response.json"
-    printf '{"nodeId":"%s","managerRole":"%s"}\n' "$node_id" "$role" >"$token_request"
-    chmod 0600 "$token_request"
-    if command -v curl >/dev/null 2>&1; then
-      printf 'header = "Authorization: Bearer %s"\n' "$enrollment_token" | \
-        curl --config - -fsSL -H 'content-type: application/json' \
-          --data-binary "@$token_request" "$node_token_endpoint" -o "$token_response"
-    elif command -v wget >/dev/null 2>&1; then
-      wget -qO "$token_response" \
-        --header="Authorization: Bearer $enrollment_token" \
-        --header='content-type: application/json' \
-        --post-file="$token_request" "$node_token_endpoint"
-    else
-      fail "curl or wget is required to bind the enrollment token to $role"
-    fi
-    role_enrollment_token="$(json_value enrollmentToken "$token_response" || true)"
-    returned_node_id="$(json_value nodeId "$token_response" || true)"
-    returned_role="$(json_value managerRole "$token_response" || true)"
-    rm -f "$token_request" "$token_response"
-    [ "$returned_node_id" = "$node_id" ] || fail "node-token response does not match $role nodeId"
-    [ "$returned_role" = "$role" ] || fail "node-token response does not match manager role $role"
-    [ -n "$role_enrollment_token" ] || fail "node-token response has no enrollmentToken"
-  fi
   cat >"${role_dir}/config.env" <<ENV
-AGENTWEB_HOME=${agentweb_home}
+AGENTWEB_HOME=${install_root}
+AGENTWEB_VERIFY=${gateway_verify}
 AGENTGW_MODE=${mode}
 AGENTGW_LISTEN=${listen}
 AGENTGW_BIND=${bind}
@@ -502,34 +565,53 @@ AGENTGW_REMOTE_GWS=${remote_gws}
 AGENTGW_UPSTREAM_MODE=all
 AGENTGW_UPSTREAM_TRANSPORT=${upstream_transport}
 AGENTGW_UPSTREAM_PROXY=${upstream_proxy}
-AGENTGW_UPSTREAM_HTTP_TOKEN=${upstream_http_token}
-AGENTGW_ENROLLMENT_TOKEN=${role_enrollment_token}
 AGENTGW_MANAGEMENT_DOMAIN_ID=${management_domain_id}
 AGENTGW_REGISTRATION_POLICY_ID=${registration_policy_id}
 AGENTGW_ENROLLMENT_PROFILE=${install_profile}
 AGENTGW_MANAGER_DIR=${state_dir}/${role}/manager
 AGENTGW_MANAGER_CHILD_ENV_FILES=
 AGENTGW_DIST_DIR=${role_dir}/dist
-AGENTGW_SELF_PATH=${bin_path}
+AGENTGW_SELF_PATH=${role_bin_path}
 AGENTGW_LOG_FORMAT=json
 RUST_LOG=agentgw=info
 ENV
   cp "${role_dir}/config.env" "${env_dir}/agentweb-${device_name}-${role}.env"
 }
 
-if [ "$install_profile" = "dv" ]; then
-  write_env md manager true 127.0.0.1:17888 manager-validation Md
+if [ -n "$instance_name" ]; then
+  primary_listen=none
+  primary_bind=none
 else
-  write_env ma manager true 127.0.0.1:17888 default-chrome Ma
+  primary_listen=true
+  primary_bind=127.0.0.1:17888
+fi
+
+if [ "$install_profile" = "dv" ]; then
+  write_env md manager "$primary_listen" "$primary_bind" manager-validation Md
+else
+  write_env ma manager "$primary_listen" "$primary_bind" default-chrome Ma
   write_env mb manager none none manager-backup Mb
   write_env mc manager none none manager-backup-b Mc
+  ma_bin="${install_root}/ma/bin/agentgw"
+  mb_bin="${install_root}/mb/bin/agentgw"
+  mc_bin="${install_root}/mc/bin/agentgw"
+  for role_bin in "$ma_bin" "$mb_bin" "$mc_bin"; do
+    [ -x "$role_bin" ] || fail "role binary is missing: ${role_bin}"
+    [ "$(sha256_file "$role_bin")" = "$actual_sha" ] || fail "role binary sha256 mismatch: ${role_bin}"
+  done
+  ma_inode="$(ls -id "$ma_bin" | awk '{print $1}')"
+  mb_inode="$(ls -id "$mb_bin" | awk '{print $1}')"
+  mc_inode="$(ls -id "$mc_bin" | awk '{print $1}')"
+  [ "$ma_inode" != "$mb_inode" ] && [ "$ma_inode" != "$mc_inode" ] && [ "$mb_inode" != "$mc_inode" ] || \
+    fail "Ma/Mb/Mc role binaries must be physically independent files"
 fi
 
 install_linux_systemd() {
   scope="$1"
   role="$2"
-  unit_name="agentweb-${device_name}-${role}.service"
-  role_dir="${agentweb_home}/${role}"
+  unit_name="agentweb-${service_device_name}-${role}.service"
+  role_dir="${install_root}/${role}"
+  role_bin_path="${role_dir}/bin/agentgw"
   if [ "$scope" = "system" ]; then
     unit_dir="/etc/systemd/system"
     systemctl_cmd="systemctl"
@@ -550,7 +632,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=${role_dir}/config.env
 WorkingDirectory=${state_dir}/${role}
-ExecStart=${bin_path}
+ExecStart=${role_bin_path}
 Restart=always
 RestartSec=3
 KillSignal=SIGTERM
@@ -563,14 +645,25 @@ UNIT
   $systemctl_cmd daemon-reload
   $systemctl_cmd enable "$unit_name" >/dev/null
   $systemctl_cmd restart "$unit_name"
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if $systemctl_cmd is-active --quiet "$unit_name"; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  $systemctl_cmd status "$unit_name" >&2 2>/dev/null || true
+  fail "AgentWeb role failed supervisor readiness: ${unit_name}"
 }
 
 install_macos_launchd() {
   role="$1"
-  label="win.yxsbase.agentweb.${device_name}.${role}"
+  label="win.yxsbase.agentweb.${service_device_name}.${role}"
   plist_dir="${HOME}/Library/LaunchAgents"
   plist="${plist_dir}/${label}.plist"
-  role_dir="${agentweb_home}/${role}"
+  role_dir="${install_root}/${role}"
+  role_bin_path="${role_dir}/bin/agentgw"
   mkdir -p "$plist_dir"
   cat >"$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -582,7 +675,7 @@ install_macos_launchd() {
   <array>
     <string>/bin/sh</string>
     <string>-lc</string>
-    <string>set -a; . '${role_dir}/config.env'; set +a; exec '${bin_path}'</string>
+    <string>set -a; . '${role_dir}/config.env'; set +a; exec '${role_bin_path}'</string>
   </array>
   <key>WorkingDirectory</key><string>${state_dir}/${role}</string>
   <key>RunAtLoad</key><true/>
@@ -605,9 +698,10 @@ cleanup_stale_macos_launchd() {
   for role in ma mb mc md; do
     for plist in "${HOME}/Library/LaunchAgents"/win.yxsbase.agentweb.*."${role}".plist; do
       [ -e "$plist" ] || continue
+      grep -Fq "'${install_root}/${role}/config.env'" "$plist" || continue
       base="$(basename "$plist" .plist)"
       case "$base" in
-        "win.yxsbase.agentweb.${device_name}.${role}")
+        "win.yxsbase.agentweb.${service_device_name}.${role}")
           ;;
         win.yxsbase.agentweb.*."${role}")
           launchctl bootout "gui/${uid}/${base}" >/dev/null 2>&1 || launchctl unload "$plist" >/dev/null 2>&1 || true
@@ -649,7 +743,37 @@ wait_local_ready() {
       ;;
     linux)
       log "systemd status:"
-      (systemctl status "agentweb-${device_name}-ma.service" || systemctl --user status "agentweb-${device_name}-ma.service") >&2 2>/dev/null || true
+      (systemctl status "agentweb-${service_device_name}-ma.service" || systemctl --user status "agentweb-${service_device_name}-ma.service") >&2 2>/dev/null || true
+      ;;
+  esac
+  return 1
+}
+
+wait_named_instance_ready() {
+  role=ma
+  [ "$install_profile" = "dv" ] && role=md
+  case "$os" in
+    linux)
+      unit="agentweb-${service_device_name}-${role}.service"
+      i=0
+      while [ "$i" -lt 30 ]; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null || systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+          return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+      done
+      ;;
+    darwin)
+      label="win.yxsbase.agentweb.${service_device_name}.${role}"
+      i=0
+      while [ "$i" -lt 30 ]; do
+        if launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1; then
+          return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+      done
       ;;
   esac
   return 1
@@ -668,9 +792,9 @@ case "$os" in
     if [ "$install_profile" = "dv" ]; then
       install_linux_systemd "$svc_scope" md
     else
-      install_linux_systemd "$svc_scope" ma
       install_linux_systemd "$svc_scope" mb
       install_linux_systemd "$svc_scope" mc
+      install_linux_systemd "$svc_scope" ma
     fi
     ;;
   darwin)
@@ -678,18 +802,25 @@ case "$os" in
     if [ "$install_profile" = "dv" ]; then
       install_macos_launchd md
     else
-      install_macos_launchd ma
       install_macos_launchd mb
       install_macos_launchd mc
+      install_macos_launchd ma
     fi
     ;;
 esac
 
-wait_local_ready || fail "AgentWeb manager installation completed but local primary readiness check failed"
+if [ -n "$instance_name" ]; then
+  wait_named_instance_ready || fail "AgentWeb named instance installation completed but supervisor readiness check failed"
+else
+  wait_local_ready || fail "AgentWeb manager installation completed but local primary readiness check failed"
+fi
 
 log "AgentWeb manager profile installed: ${install_profile}"
-log "  home: ${agentweb_home}"
+log "  operation: ${install_state}"
+log "  home: ${install_root}"
+[ -z "$instance_name" ] || log "  instance: ${instance_name}"
 log "  binary: ${bin_path}"
+[ "$install_profile" = "dv" ] || log "  role binaries: ma/mb/mc independent files"
 log "  sha256: ${actual_sha}"
 log "  device: ${device_name}"
 log "  management domain: ${management_domain_id:-break-glass}"

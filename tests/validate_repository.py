@@ -47,6 +47,13 @@ installer = (root / "install.sh").read_text()
 assert '--gateway or AGENTWEB_SETUP_GATEWAY is required' in installer
 assert "https://gateway.example.com" in (root / "README.md").read_text()
 
+powershell_installer = (root / "install.ps1").read_text()
+assert "$manifest.artifacts.'windows-x64'" in powershell_installer
+assert "x86_64-pc-windows-gnu" in powershell_installer
+assert "x86_64-pc-windows-msvc" not in powershell_installer
+assert "function Get-AgentWebSetupBootstrap([Uri]$Origin)" in powershell_installer
+assert "$claimOrigin = [Uri]$claimUri.GetLeftPart" in powershell_installer
+
 source_installer = root.parent / "agentweb" / "agentgw" / "src" / "static" / "install.sh"
 if source_installer.is_file():
     assert (root / "install.sh").read_bytes() == source_installer.read_bytes(), "installer drift"

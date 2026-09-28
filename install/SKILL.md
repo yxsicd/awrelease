@@ -8,6 +8,13 @@ metadata:
 
 # Install AgentWeb
 
+This repository owns both public installer scripts. Gateways should emit the
+raw `awrelease/main` installer URLs and keep any gateway-local `/install.sh` or
+`/install.ps1` route only as a compatibility redirect. A script-only correction
+is released by updating this repository; never rebuild AgentGW merely to change
+installer logic. The Windows release target is the manifest-authoritative
+`x86_64-pc-windows-gnu` target produced by the public release workflow.
+
 Prerequisites are `curl` or `wget`, a SHA-256 tool, and systemd on Linux or
 launchd on macOS. Windows x64 uses PowerShell 5.1 or newer and the current-user
 Task Scheduler or Startup folder.

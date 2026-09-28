@@ -5,6 +5,10 @@ This repository is the public install and binary release authority for
 single GitHub URL, read [`SKILL.md`](SKILL.md), select the required capability,
 and install only checksum-verified release bytes.
 
+`install.sh` and `install.ps1` are the installer source of truth. AgentWeb
+gateways reference these public scripts directly; script-only repairs are
+published here and do not require rebuilding the AgentGW binary.
+
 ## Install an AgentWeb node
 
 The gateway must be supplied by the deployment operator. New deployments use
