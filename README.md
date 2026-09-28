@@ -16,7 +16,7 @@ the unified verify `agentwebadmin`; the fixed Basic username is `agentweb`.
 The installer requests and consumes its own single-use enrollment claim:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/refs/heads/main/install.sh \
   | sh -s -- --gateway https://gateway.example.com
 ```
 
@@ -28,7 +28,7 @@ and checks local `/build-info` readiness.
 Windows x64 uses the matching public PowerShell installer:
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/yxsicd/awrelease/main/install.ps1'))) `
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/yxsicd/awrelease/refs/heads/main/install.ps1'))) `
   -Gateway 'https://gateway.example.com'
 ```
 

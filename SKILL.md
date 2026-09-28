@@ -27,7 +27,7 @@ gateway. The installer uses Basic user `agentweb`, unified verify
 Run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/refs/heads/main/install.sh \
   | sh -s -- --gateway https://gateway.example.com
 ```
 

@@ -52,7 +52,7 @@ the manifest.
 The default POSIX install requests and consumes the claim itself:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/yxsicd/awrelease/refs/heads/main/install.sh \
   | sh -s -- --gateway https://gateway.example.com
 ```
 
@@ -63,7 +63,7 @@ issued claim. `--device NAME --remote-gws URLS` remains the break-glass path.
 On Windows x64, use the public PowerShell installer:
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/yxsicd/awrelease/main/install.ps1'))) `
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/yxsicd/awrelease/refs/heads/main/install.ps1'))) `
   -Gateway 'https://gateway.example.com'
 ```
 

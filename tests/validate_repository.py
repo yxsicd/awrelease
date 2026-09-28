@@ -46,6 +46,10 @@ for required in (
 installer = (root / "install.sh").read_text()
 assert '--gateway or AGENTWEB_SETUP_GATEWAY is required' in installer
 assert "https://gateway.example.com" in (root / "README.md").read_text()
+for relative in ("README.md", "SKILL.md", "install/SKILL.md"):
+    public_text = (root / relative).read_text()
+    assert "raw.githubusercontent.com/yxsicd/awrelease/refs/heads/main/install" in public_text
+    assert "raw.githubusercontent.com/yxsicd/awrelease/main/install" not in public_text
 
 powershell_installer = (root / "install.ps1").read_text()
 assert "$manifest.artifacts.'windows-x64'" in powershell_installer
