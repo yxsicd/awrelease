@@ -76,7 +76,14 @@ function Set-AgentWebTaskSettings([string]$TaskName) {
 }
 
 function Stop-AgentWebRoleProcess([string]$TaskName, [string]$Config) {
-  & schtasks.exe /End /TN $TaskName 2>$null | Out-Null
+  $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if ($existingTask) {
+    try {
+      Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    } catch {
+      Fail "could not stop existing scheduled task $TaskName before repair: $($_.Exception.Message)"
+    }
+  }
   try {
     $matches = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
       $_.CommandLine -and $_.CommandLine.IndexOf($Config, [StringComparison]::OrdinalIgnoreCase) -ge 0
