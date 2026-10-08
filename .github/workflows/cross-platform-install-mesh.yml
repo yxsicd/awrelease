@@ -114,9 +114,11 @@ jobs:
         shell: bash
         run: |
           gateway="$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/host-rgw/edge.json"))["localGateway"])')"
+          channel="$(python3 -c 'import json; print(json.load(open("${{ runner.temp }}/host-rgw/edge.json"))["channel"])')"
           AGENTWEB_HOME="${{ runner.temp }}/agentweb" \
             sh install.sh \
               --gateway "$gateway" \
+              --channel "$channel" \
               --device "gha-${{ matrix.platform }}-${{ github.run_id }}" \
               --profile production \
               --basic agentwebadmin
@@ -127,6 +129,7 @@ jobs:
           $edge = Get-Content -Raw "${{ runner.temp }}/host-rgw/edge.json" | ConvertFrom-Json
           & ./install.ps1 `
             -Gateway $edge.localGateway `
+            -Channel $edge.channel `
             -DeviceName "gha-${{ matrix.platform }}-${{ github.run_id }}" `
             -Profile production `
             -Basic agentwebadmin `

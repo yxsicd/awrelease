@@ -107,7 +107,7 @@ The cross-platform install mesh additionally runs the real public installer on
 Linux x64, Linux arm64, macOS arm64, and Windows x64. Linux hosts run their
 own edge RGW; macOS and Windows use distinct edge RGWs hosted on the Linux
 coordinator. Each client platform installs Ma/Mb/Mc through its assigned edge
-RGW. Every edge RGW connects outbound to two independent central Linux RGWs
+RGW, using that workflow's selected release channel. Every edge RGW connects outbound to two independent central Linux RGWs
 behind one public tunnel. No gateway binary runs on macOS or Windows.
 The gate proves edge `peer_direct` routing and central
 `upstream_local_peer` routing from every native runner to all twelve Ma/Mb/Mc

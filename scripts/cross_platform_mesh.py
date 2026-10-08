@@ -332,7 +332,7 @@ def edge_start(state_dir: pathlib.Path, endpoints_path: pathlib.Path, platform_n
         health = wait_json(hosted["url"] + "/health")
         if health.get("nodeId") != hosted.get("nodeId"):
             raise RuntimeError("hosted gateway identity changed")
-        result = {"platform": platform_name, "localGateway": hosted["url"], "pid": None,
+        result = {"platform": platform_name, "channel": bundle["channel"], "localGateway": hosted["url"], "pid": None,
                   "gatewayPlatform": hosted["gatewayPlatform"], "hostedLinuxGateway": True,
                   "nodeId": health["nodeId"], "centralGateways": bundle["centralGateways"]}
         (state_dir / "edge.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -351,7 +351,7 @@ def edge_start(state_dir: pathlib.Path, endpoints_path: pathlib.Path, platform_n
     process = start_detached([str(binary)], env, state_dir / "agentgw.log")
     try:
         health = wait_json(f"{local_url}/health", process)
-        result = {"platform": platform_name, "localGateway": local_url, "pid": process.pid,
+        result = {"platform": platform_name, "channel": bundle["channel"], "localGateway": local_url, "pid": process.pid,
                   "nodeId": health["nodeId"], "gatewayPlatform": platform_name, "hostedLinuxGateway": False,
                   "centralGateways": bundle["centralGateways"]}
         (state_dir / "edge.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

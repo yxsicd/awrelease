@@ -92,6 +92,8 @@ for required in (
     "github.event.release.tag_name",
 ):
     assert required in mesh_workflow, required
+assert '--channel "$channel"' in mesh_workflow
+assert "-Channel $edge.channel" in mesh_workflow
 mesh = (root / "scripts" / "cross_platform_mesh.py").read_text()
 for required in (
     "linux-x64", "linux-arm64", "macos-arm64", "windows-x64",

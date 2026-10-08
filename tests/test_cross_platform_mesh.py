@@ -93,6 +93,7 @@ class RedundantMeshTests(unittest.TestCase):
                     MESH.edge_start(root / "edge", endpoints, platform)
                 download.assert_not_called(); start.assert_not_called()
                 result = json.loads((root / "edge/edge.json").read_text())
+                self.assertEqual("prod", result["channel"])
                 self.assertIsNone(result["pid"])
                 self.assertTrue(result["hostedLinuxGateway"])
                 self.assertEqual("linux-x64", result["gatewayPlatform"])
