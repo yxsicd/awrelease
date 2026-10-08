@@ -65,22 +65,37 @@ ask the operator when the deployment has not advertised one.
 ## Release assets
 
 Fixed GitHub Release tags are `dev`, `main`, and `prod`. Each channel contains
-service-qualified manifests and platform binaries for AgentGW, AWMCP, and
+service-qualified manifests and platform binaries for AgentGW clients, Linux gateways, AWMCP, and
 AWGDrive. Consumers must use `agentgw-<channel>.json`,
-`awmcp-<channel>.json`, or `awgdrive-<channel>.json` and verify the declared
+`agentgw-server-<channel>.json`, `awmcp-<channel>.json`, or `awgdrive-<channel>.json` and verify the declared
 size and SHA-256 before execution.
+
+Client downloads keep `agentgw-linux-x64`, `agentgw-linux-arm64`,
+`agentgw-macos-arm64`, and `agentgw-windows-x64.exe`. Gateway releases add
+`agentgw-server-linux-x64` and `agentgw-server-linux-arm64`, both Linux musl.
+Availability is determined by the selected channel manifest.
+The installer continues to consume the client manifest. Each role has its own
+complete artifact set and byte-preserving dev/main/prod promotion.
+
+The gateway smoke prefers the server manifest. During additive migration it
+accepts the historical combined client-name package only when the server
+manifest is missing and the old manifest has no role label. An explicitly
+labelled client package cannot run as a gateway. Transport, authentication,
+JSON, identity and checksum errors never trigger fallback. Publish and qualify
+the server pair, migrate gateway consumers, then replace client channels.
 
 Examples:
 
 ```text
 https://github.com/yxsicd/awrelease/releases/download/prod/agentgw-prod.json
+https://github.com/yxsicd/awrelease/releases/download/prod/agentgw-server-prod.json
 https://github.com/yxsicd/awrelease/releases/download/prod/awmcp-prod.json
 ```
 
 ## Public release smoke
 
 GitHub Actions runs the public `main` and `prod` binaries without private source
-or credentials. It verifies manifests and hashes, starts RGW plus same-host
+or credentials. It verifies manifests and hashes, starts the Linux gateway package plus client-package same-host
 Ma/Mb/Mc, checks every operation advertised by AgentGW's public OpenAPI, and
 exercises header/Bearer authentication, structured failures, exact routed
 commands, binary upload/download, byte ranges, and all three manager roles. It
@@ -89,10 +104,12 @@ and host-development Skills through MCP, rejects an invalid verify value, and
 follows both release and runtime Website Skills.
 
 The cross-platform install mesh additionally runs the real public installer on
-Linux x64, Linux arm64, macOS arm64, and Windows x64. Each native host starts a
-separate local RGW process, then installs Ma/Mb/Mc through that RGW. Every host
-RGW connects outbound to two independent central RGWs behind one public tunnel.
-The gate proves local `peer_direct` routing and central
+Linux x64, Linux arm64, macOS arm64, and Windows x64. Linux hosts run their
+own edge RGW; macOS and Windows use distinct edge RGWs hosted on the Linux
+coordinator. Each client platform installs Ma/Mb/Mc through its assigned edge
+RGW. Every edge RGW connects outbound to two independent central Linux RGWs
+behind one public tunnel. No gateway binary runs on macOS or Windows.
+The gate proves edge `peer_direct` routing and central
 `upstream_local_peer` routing from every native runner to all twelve Ma/Mb/Mc
 peers, including synchronous command and file round trips through both central
 RGWs. It then stops one central RGW, repeats command and file checks for all

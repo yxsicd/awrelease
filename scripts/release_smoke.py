@@ -16,11 +16,15 @@ import socket
 import subprocess
 import shutil
 import tempfile
+import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from release_artifacts import gateway_manifest, validate_manifest, cache_bust_url
 
 MCP_VERSION = "2025-06-18"
 EXPECTED_TOOLS = {
@@ -101,7 +105,7 @@ def expect_json_status(
 
 
 def download(url: str, path: pathlib.Path) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "awrelease-smoke/1"})
+    req = urllib.request.Request(cache_bust_url(url), headers={"User-Agent": "awrelease-smoke/1"})
     with urllib.request.urlopen(req, timeout=60) as response, path.open("wb") as output:
         while chunk := response.read(1024 * 1024):
             output.write(chunk)
@@ -488,6 +492,7 @@ def stop(process: subprocess.Popen | None) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--channel", choices=("dev", "main", "prod"), default="prod")
+    parser.add_argument("--gateway-service", choices=("auto", "agentgw-server", "agentgw"), default="auto")
     parser.add_argument("--repository", default="yxsicd/awrelease")
     parser.add_argument("--output", required=True)
     parser.add_argument("--require-runtime-website-skills", action="store_true")
@@ -507,14 +512,19 @@ def main() -> int:
         temp_path = pathlib.Path(temp)
         manifests = {}
         binaries = {}
-        for service in ("agentgw", "awmcp"):
+        gateway_release = gateway_manifest(args.channel, args.repository, args.asset_cache, args.gateway_service)
+        for service in ("agentgw", "gateway", "awmcp"):
             manifest_name = f"{service}-{args.channel}.json"
-            if args.asset_cache:
+            if service == "gateway":
+                manifest = gateway_release
+            elif args.asset_cache:
                 manifest = json.loads((args.asset_cache / manifest_name).read_text())
             else:
-                manifest = get_json(f"{base}/{manifest_name}")
+                manifest = get_json(cache_bust_url(f"{base}/{manifest_name}"))
             if manifest.get("channel") != args.channel or manifest.get("gitDirty") is not False:
                 raise RuntimeError(f"invalid {service} channel manifest identity")
+            if service == "agentgw":
+                validate_manifest(manifest, "agentgw", args.channel)
             artifact = manifest["artifacts"]["linux-x64-musl"]
             binary = temp_path / artifact["filename"]
             if args.asset_cache:
@@ -548,7 +558,7 @@ def main() -> int:
                 "AGENTWEB_PUBLIC_MCP_URL": f"http://127.0.0.1:{mcp_port}/mcp",
             })
             gateway = subprocess.Popen(
-                [str(binaries["agentgw"])], env=gateway_env,
+                [str(binaries["gateway"])], env=gateway_env,
                 stdout=gateway_log, stderr=subprocess.STDOUT,
             )
             gateway_health = wait_json(f"http://127.0.0.1:{gateway_port}/health", gateway)
@@ -563,7 +573,7 @@ def main() -> int:
             openapi_operations = smoke_openapi(openapi)
             if gateway_health.get("service") != "agentgw":
                 raise RuntimeError("released AgentGW health identity is invalid")
-            validate_runtime_build("agentgw", build_info, manifests["agentgw"])
+            validate_runtime_build("agentgw", build_info, manifests["gateway"])
             if api_index.get("service") != "agentgw" or capabilities.get("ok") is not True:
                 raise RuntimeError("released AgentGW API index or capabilities are invalid")
             if topology.get("ok") is not True or not isinstance(topology.get("peers"), list):
@@ -700,6 +710,8 @@ def main() -> int:
                 "mcpToolCount": len(tools),
                 "mcpToolCalls": mcp_evidence,
                 "agentgwGitSha": manifests["agentgw"]["gitSha"],
+                "gatewayService": manifests["gateway"]["service"],
+                "gatewayGitSha": manifests["gateway"]["gitSha"],
                 "awmcpGitSha": manifests["awmcp"]["gitSha"],
                 "runtimeMcpAdvertised": discovery["interfaces"].get("mcp"),
                 "runtimeWebsiteSkillsVerified": args.require_runtime_website_skills,

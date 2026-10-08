@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-platform install smoke with a separate RGW and Mabc on every host."""
+"""Four-platform clients, Linux-only gateways, and redundant nested routing."""
 
 from __future__ import annotations
 
@@ -14,15 +14,20 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from release_artifacts import gateway_manifest, cache_bust_url
+
 VERIFY = "agentwebadmin"
 PLATFORMS = ("linux-x64", "linux-arm64", "macos-arm64", "windows-x64")
 CENTRAL_IDS = ("rgw-a", "rgw-b")
 CLUSTER_ID = "11111111-1111-4111-8111-111111111111"
+HOSTED_PLATFORMS = ("macos-arm64", "windows-x64")
 SIGNING_KEY = "github-actions-ephemeral-signing-key-0001"
 
 
@@ -44,7 +49,7 @@ def get_json(url: str, headers: dict | None = None) -> dict:
 
 
 def download(url: str, path: pathlib.Path) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "awrelease-mesh/3"})
+    req = urllib.request.Request(cache_bust_url(url), headers={"User-Agent": "awrelease-mesh/3"})
     with urllib.request.urlopen(req, timeout=120) as response, path.open("wb") as output:
         shutil.copyfileobj(response, output)
 
@@ -84,7 +89,9 @@ def artifact_key() -> str:
 
 
 def download_agentgw(channel: str, directory: pathlib.Path) -> pathlib.Path:
-    manifest = get_json(f"https://github.com/yxsicd/awrelease/releases/download/{channel}/agentgw-{channel}.json")
+    if platform.system() != "Linux":
+        raise RuntimeError("gateway binaries run on Linux only")
+    manifest = gateway_manifest(channel)
     artifact = manifest["artifacts"][artifact_key()]
     binary = directory / artifact["filename"]
     download(artifact.get("downloadUrl") or artifact["url"], binary)
@@ -94,9 +101,6 @@ def download_agentgw(channel: str, directory: pathlib.Path) -> pathlib.Path:
         raise RuntimeError("AgentGW size mismatch")
     if platform.system() != "Windows":
         binary.chmod(0o755)
-    if platform.system() == "Darwin":
-        subprocess.run(["codesign", "--force", "--sign", "-", str(binary)], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return binary
 
 
@@ -159,7 +163,7 @@ def write_host_topology(path: pathlib.Path, platform_name: str, local_url: str) 
         "kind": "agentweb.current-topology",
         "gatewayClusters": [{"id": CLUSTER_ID, "name": "GitHub Actions host-local gateway"}],
         "rgws": [{"id": logical_id, "publicUrl": local_url,
-                  "wsUrl": f"{local_url.replace('http://', 'ws://', 1)}/ws?role=upstream"}],
+                  "wsUrl": f"{local_url.replace('https://', 'wss://', 1).replace('http://', 'ws://', 1)}/ws?role=upstream"}],
         "registrationPolicies": [{"id": "personal-default", "domainId": "ci",
                                   "gatewayClusterIds": [CLUSTER_ID], "publicGatewayIds": [logical_id]}],
         "enrollmentIssuers": [{"id": "ci", "gatewayInstanceIds": [logical_id],
@@ -206,10 +210,10 @@ def write_haproxy_config(path: pathlib.Path, bind_port: int, backend_ports: dict
     lines = ["global", "  maxconn 2048", "defaults", "  mode http", "  timeout connect 10s",
              "  timeout client 5m", "  timeout server 5m", "frontend mesh",
              f"  bind 127.0.0.1:{bind_port}"]
-    for gateway in CENTRAL_IDS:
+    for gateway in backend_ports:
         lines.extend([f"  acl path_{gateway.replace('-', '_')} path_beg /{gateway}",
                       f"  use_backend {gateway.replace('-', '_')} if path_{gateway.replace('-', '_')}"])
-    for gateway in CENTRAL_IDS:
+    for gateway in backend_ports:
         safe = gateway.replace("-", "_")
         lines.extend([f"backend {safe}", f"  http-request set-path %[path,regsub(^/{gateway},)]",
                       f"  server {safe} 127.0.0.1:{backend_ports[gateway]}"])
@@ -247,7 +251,8 @@ def start_public_tunnel(proxy_port: int, state_dir: pathlib.Path):
 def central_start(state_dir: pathlib.Path, channel: str) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     binary = download_agentgw(channel, state_dir)
-    backend_ports = {name: free_port() for name in CENTRAL_IDS}
+    hosted_ids = {name: "edge-" + name for name in HOSTED_PLATFORMS}
+    backend_ports = {name: free_port() for name in (*CENTRAL_IDS, *hosted_ids.values())}
     proxy_port = free_port()
     config = state_dir / "haproxy.cfg"
     write_haproxy_config(config, proxy_port, backend_ports)
@@ -269,9 +274,26 @@ def central_start(state_dir: pathlib.Path, channel: str) -> None:
             gateways[name] = start_detached([str(binary)], env, directory / "agentgw.log")
             wait_json(f"http://127.0.0.1:{backend_ports[name]}/health", gateways[name])
             wait_json(f"{endpoint['url']}/health", timeout=120)
-        bundle = {"channel": channel, "centralGateways": endpoints, "platforms": list(PLATFORMS)}
+        hosted = []
+        remote_gws = [f"{item['url'].replace('https://', 'wss://', 1)}/ws?role=upstream" for item in endpoints]
+        for native_platform, name in hosted_ids.items():
+            directory = state_dir / name
+            directory.mkdir()
+            url = f"{public_url}/{name}"
+            write_host_topology(directory / "topology.json", native_platform, url)
+            env = gateway_environment(directory, channel, "remote", backend_ports[name],
+                                      host_gateway_id(native_platform), host_logical_gateway_id(native_platform),
+                                      url, remote_gws, True)
+            gateways[name] = start_detached([str(binary)], env, directory / "agentgw.log")
+            health = wait_json(f"http://127.0.0.1:{backend_ports[name]}/health", gateways[name])
+            wait_json(f"{url}/health", timeout=120)
+            hosted.append({"platform": native_platform, "url": url, "nodeId": health["nodeId"],
+                           "gatewayPlatform": artifact_key().removesuffix("-musl")})
+        bundle = {"channel": channel, "centralGateways": endpoints, "platforms": list(PLATFORMS),
+                  "hostedEdgeGateways": hosted}
         (state_dir / "endpoint.json").write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
         runtime = {"tunnelPid": tunnel.pid, "proxyPid": proxy.pid, "binary": str(binary),
+                   "hostedEdgeGateways": [{"platform": native, "id": name, "pid": gateways[name].pid, "port": backend_ports[name]} for native, name in hosted_ids.items()],
                    "centralGateways": [{"id": name, "pid": gateways[name].pid, "port": backend_ports[name]}
                                        for name in CENTRAL_IDS]}
         (state_dir / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n", encoding="utf-8")
@@ -300,6 +322,24 @@ def read_bundle(path: pathlib.Path) -> dict:
 def edge_start(state_dir: pathlib.Path, endpoints_path: pathlib.Path, platform_name: str) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     bundle = read_bundle(endpoints_path)
+    if platform_name in HOSTED_PLATFORMS:
+        hosted = next((item for item in bundle.get("hostedEdgeGateways", [])
+                       if item.get("platform") == platform_name), None)
+        if not hosted or not str(hosted.get("url", "")).startswith("https://"):
+            raise RuntimeError("missing Linux-hosted edge gateway for " + platform_name)
+        if hosted.get("gatewayPlatform") not in ("linux-x64", "linux-arm64"):
+            raise RuntimeError("hosted edge must use a Linux gateway platform")
+        health = wait_json(hosted["url"] + "/health")
+        if health.get("nodeId") != hosted.get("nodeId"):
+            raise RuntimeError("hosted gateway identity changed")
+        result = {"platform": platform_name, "localGateway": hosted["url"], "pid": None,
+                  "gatewayPlatform": hosted["gatewayPlatform"], "hostedLinuxGateway": True,
+                  "nodeId": health["nodeId"], "centralGateways": bundle["centralGateways"]}
+        (state_dir / "edge.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(result))
+        return
+    if artifact_key().removesuffix("-musl") != platform_name:
+        raise RuntimeError("native Linux gateway platform mismatch")
     binary = download_agentgw(bundle["channel"], state_dir)
     port = free_port()
     local_url = f"http://127.0.0.1:{port}"
@@ -312,7 +352,8 @@ def edge_start(state_dir: pathlib.Path, endpoints_path: pathlib.Path, platform_n
     try:
         health = wait_json(f"{local_url}/health", process)
         result = {"platform": platform_name, "localGateway": local_url, "pid": process.pid,
-                  "nodeId": health["nodeId"], "centralGateways": bundle["centralGateways"]}
+                  "nodeId": health["nodeId"], "gatewayPlatform": platform_name, "hostedLinuxGateway": False,
+                  "centralGateways": bundle["centralGateways"]}
         (state_dir / "edge.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(result))
     except Exception:
@@ -478,7 +519,8 @@ def client_test(endpoints_root: pathlib.Path, edge_state: pathlib.Path,
         target_platform_counts[endpoint["id"]] = counts
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps({"ok": True, "sourcePlatform": source_platform,
-                                  "separateHostRgwPid": edge["pid"], "localMabcCount": len(local),
+                                  "separateHostRgwPid": edge["pid"], "gatewayPlatform": edge.get("gatewayPlatform", source_platform),
+                                  "hostedLinuxGateway": edge.get("hostedLinuxGateway", False), "localMabcCount": len(local),
                                   "centralCounts": central_counts, "routedCheckCount": checks,
                                   "checkedPeerCount": len(checked_peer_ids),
                                   "targetPlatformCounts": target_platform_counts,

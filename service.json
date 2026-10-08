@@ -21,9 +21,32 @@
   },
   "releaseChannels": {
     "default": "prod",
-    "order": ["dev", "main", "prod"],
+    "order": [
+      "dev",
+      "main",
+      "prod"
+    ],
     "agentgwManifestTemplate": "https://github.com/yxsicd/awrelease/releases/download/{channel}/agentgw-{channel}.json",
-    "awmcpManifestTemplate": "https://github.com/yxsicd/awrelease/releases/download/{channel}/awmcp-{channel}.json"
+    "awmcpManifestTemplate": "https://github.com/yxsicd/awrelease/releases/download/{channel}/awmcp-{channel}.json",
+    "agentgwServerManifestTemplate": "https://github.com/yxsicd/awrelease/releases/download/{channel}/agentgw-server-{channel}.json",
+    "roles": {
+      "client": {
+        "service": "agentgw",
+        "platforms": [
+          "linux-x64",
+          "linux-arm64",
+          "macos-arm64",
+          "windows-x64"
+        ]
+      },
+      "gateway": {
+        "service": "agentgw-server",
+        "platforms": [
+          "linux-x64",
+          "linux-arm64"
+        ]
+      }
+    }
   },
   "transports": {
     "http": {

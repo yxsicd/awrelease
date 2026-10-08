@@ -37,6 +37,15 @@ binary before replacing or starting anything. Use `--gateway`, `--device`,
 verify is used for RGW HTTP, AWMCP, and Basic claim issuance. A legacy upgraded
 gateway may advertise `crc`; custom values must be supplied explicitly.
 
+## Release roles
+
+Installation uses `agentgw-<channel>.json` and the existing four client binary
+names. Linux gateways use `agentgw-server-<channel>.json` with two Linux musl
+assets. Read [release assets and migration](./README.md#release-assets) before
+selecting gateway packages. Add the gateway release before changing consumers
+or slimming client channels. A labelled client package is never a gateway
+fallback; the old unlabelled combined package is a migration exception only.
+
 ## Stop conditions
 
 Stop if the claim target, host, channel, platform, checksum, or existing

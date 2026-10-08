@@ -18,6 +18,10 @@ assert set(descriptor["transports"]) == {"http", "mcp", "websiteSkills"}
 assert descriptor["transports"]["mcp"]["compatibility"] == "unchanged"
 assert descriptor["releaseChannels"]["default"] == "prod"
 assert descriptor["releaseChannels"]["order"] == ["dev", "main", "prod"]
+assert descriptor["releaseChannels"]["roles"]["client"]["service"] == "agentgw"
+assert descriptor["releaseChannels"]["roles"]["gateway"] == {
+    "service": "agentgw-server", "platforms": ["linux-x64", "linux-arm64"]}
+assert descriptor["releaseChannels"]["agentgwServerManifestTemplate"].endswith("/agentgw-server-{channel}.json")
 assert descriptor["discovery"]["runtimeEnrollmentDiscoveryPath"] == "/setup/api/bootstrap-info"
 
 for relative in ("README.md", "SKILL.md", "service.json", "skills.json", "install.sh", "install.ps1"):

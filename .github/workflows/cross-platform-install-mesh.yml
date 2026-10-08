@@ -76,7 +76,7 @@ jobs:
           retention-days: 14
 
   native-install-and-mesh:
-    name: native host RGW plus Mabc (${{ matrix.platform }})
+    name: native client plus Linux edge RGW and Mabc (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -102,14 +102,14 @@ jobs:
           --name "mesh-endpoints-${{ github.run_id }}"
           --out "${{ runner.temp }}/mesh-endpoints"
           --timeout 900
-      - name: Start a distinct host-local RGW process
+      - name: Select the platform edge gateway (Linux only)
         shell: bash
         run: >-
           python scripts/cross_platform_mesh.py edge-start
           --endpoints "${{ runner.temp }}/mesh-endpoints/endpoint.json"
           --state "${{ runner.temp }}/host-rgw"
           --platform "${{ matrix.platform }}"
-      - name: Install POSIX Mabc through the host-local RGW
+      - name: Install POSIX Mabc through its edge RGW
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -120,7 +120,7 @@ jobs:
               --device "gha-${{ matrix.platform }}-${{ github.run_id }}" \
               --profile production \
               --basic agentwebadmin
-      - name: Install Windows Mabc through the host-local RGW
+      - name: Install Windows Mabc through its Linux edge RGW
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -146,7 +146,7 @@ jobs:
           path: ${{ runner.temp }}/mesh-result/result.json
           if-no-files-found: error
           retention-days: 14
-      - name: Keep the host RGW and Mabc alive through failover recovery
+      - name: Keep client Mabc and Linux gateways alive through failover recovery
         shell: bash
         run: >-
           python scripts/github_artifact_bus.py wait-download
