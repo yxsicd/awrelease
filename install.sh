@@ -40,6 +40,39 @@ download() {
   fi
 }
 
+download_resumable() {
+  src="$1"
+  dst="$2"
+  if command -v curl >/dev/null 2>&1; then
+    if [ -s "$dst" ]; then
+      log "AgentWeb package: attempting to resume existing partial download"
+      if curl -fsSL -C - "$src" -o "$dst"; then
+        return 0
+      else
+        resume_rc=$?
+      fi
+      if [ "$resume_rc" -ne 33 ]; then
+        return "$resume_rc"
+      fi
+      # Only a server that refuses byte ranges needs a fresh transfer.
+      # Keep the original partial file until the replacement succeeds.
+      fresh_dst="${dst}.fresh.$$"
+      if curl -fsSL "$src" -o "$fresh_dst"; then
+        mv -f "$fresh_dst" "$dst"
+      else
+        rm -f "$fresh_dst"
+        return 1
+      fi
+    else
+      curl -fsSL "$src" -o "$dst"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -c -O "$dst" "$src"
+  else
+    fail "curl or wget is required"
+  fi
+}
+
 sha256_file() {
   file="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -342,6 +375,12 @@ prepared_bin=""
 prepared_manifest_url=""
 prepared_sha=""
 
+matches_release_sha() {
+  candidate="$1"
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] &&
+    [ "$(sha256_file "$candidate")" = "$expected_sha" ]
+}
+
 prepare_release_artifact() {
   release_manifest_url="$1"
   [ -n "$release_manifest_url" ] || fail "gateway bootstrap has no release manifest URL"
@@ -352,15 +391,62 @@ prepare_release_artifact() {
   [ -n "$download_url" ] || fail "manifest does not contain downloadUrl for ${artifact_key}: ${release_manifest_url}"
   [ -n "$expected_sha" ] || fail "manifest does not contain sha256 for ${artifact_key}: ${release_manifest_url}"
   [ "$artifact_target" = "$expected_target" ] || fail "manifest target mismatch for ${artifact_key}: expected ${expected_target}, got ${artifact_target:-missing}"
-  prepared_bin="${tmp_dir}/agentgw.${artifact_key}.$$"
-  rm -f "$prepared_bin"
-  log "AgentWeb package preflight: downloading ${artifact_key} before consuming enrollment claim"
-  download "$download_url" "$prepared_bin"
-  actual_sha="$(sha256_file "$prepared_bin")"
-  [ "$actual_sha" = "$expected_sha" ] || fail "sha256 mismatch for ${download_url}: expected ${expected_sha}, got ${actual_sha}"
-  chmod 0755 "$prepared_bin"
+  [ "${#expected_sha}" -eq 64 ] || fail "release manifest has an invalid sha256 length"
+  case "$expected_sha" in
+    *[!0123456789abcdef]*) fail "release manifest has an invalid sha256" ;;
+  esac
+
+  # Prefer a manually staged or previously installed and verified bin.
+  if matches_release_sha "$bin_path"; then
+    prepared_bin="$bin_path"
+    log "AgentWeb package preflight: reusing verified ${bin_path} for ${artifact_key}"
+  else
+    cache_dir="${tmp_dir}/release-cache"
+    mkdir -p "$cache_dir"
+    cached_bin="${cache_dir}/agentgw.${artifact_key}.${expected_sha}"
+    partial_bin="${cached_bin}.part"
+
+    if [ -e "$cached_bin" ] && ! matches_release_sha "$cached_bin"; then
+      log "AgentWeb package cache: invalid entry, discarding"
+      rm -f "$cached_bin"
+    fi
+    if [ ! -f "$cached_bin" ]; then
+      for legacy_bin in "$tmp_dir"/agentgw."$artifact_key".[0-9]*; do
+        case "${legacy_bin##*.}" in
+          ""|*[!0123456789]*) continue ;;
+        esac
+        if matches_release_sha "$legacy_bin"; then
+          cp "$legacy_bin" "$cached_bin"
+          log "AgentWeb package cache: reused verified legacy tmp package"
+          break
+        fi
+      done
+    fi
+    if [ ! -f "$cached_bin" ] && matches_release_sha "$partial_bin"; then
+      mv -f "$partial_bin" "$cached_bin"
+    fi
+    if [ ! -f "$cached_bin" ]; then
+      log "AgentWeb package preflight: downloading ${artifact_key} into resumable cache"
+      if ! download_resumable "$download_url" "$partial_bin"; then
+        # Curl may return HTTP 416 when the partial is already complete.
+        matches_release_sha "$partial_bin" ||
+          fail "download failed; partial bytes retained at ${partial_bin}"
+      fi
+      if ! matches_release_sha "$partial_bin"; then
+        rm -f "$partial_bin"
+        fail "sha256 mismatch for downloaded ${artifact_key} package"
+      fi
+      mv -f "$partial_bin" "$cached_bin"
+    else
+      log "AgentWeb package cache: reusing verified ${artifact_key} package"
+    fi
+    matches_release_sha "$cached_bin" || fail "cached package failed sha256 verification"
+    prepared_bin="${tmp_dir}/agentgw.${artifact_key}.$$"
+    cp "$cached_bin" "$prepared_bin"
+    chmod 0755 "$prepared_bin"
+  fi
   prepared_manifest_url="$release_manifest_url"
-  prepared_sha="$actual_sha"
+  prepared_sha="$expected_sha"
 }
 
 default_device="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo agentweb-node)"
@@ -512,13 +598,17 @@ if [ -z "$prepared_bin" ]; then
   prepare_release_artifact "$manifest_url"
 fi
 actual_sha="$prepared_sha"
-if [ -x "$bin_path" ]; then
-  cp -p "$bin_path" "${bin_path}.bak.$(date -u +%Y%m%d%H%M%S)"
-fi
-mv "$prepared_bin" "$bin_path"
-chmod 0755 "$bin_path"
-if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
-  codesign --force --sign - "$bin_path" >/dev/null 2>&1 || fail "macOS codesign failed for ${bin_path}"
+if [ "$prepared_bin" != "$bin_path" ]; then
+  if [ -x "$bin_path" ]; then
+    cp -p "$bin_path" "${bin_path}.bak.$(date -u +%Y%m%d%H%M%S)"
+  fi
+  mv "$prepared_bin" "$bin_path"
+  chmod 0755 "$bin_path"
+  if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - "$bin_path" >/dev/null 2>&1 || fail "macOS codesign failed for ${bin_path}"
+  fi
+else
+  chmod 0755 "$bin_path"
 fi
 
 write_env() {
@@ -532,13 +622,18 @@ write_env() {
   role_bin_dir="${role_dir}/bin"
   role_bin_path="${role_bin_dir}/agentgw"
   mkdir -p "$role_dir" "$role_bin_dir" "${state_dir}/${role}" "${role_dir}/dist"
-  role_bin_incoming="${role_bin_path}.incoming.$$"
-  cp "$bin_path" "$role_bin_incoming"
-  chmod 0755 "$role_bin_incoming"
-  if [ -x "$role_bin_path" ]; then
-    cp -p "$role_bin_path" "${role_bin_path}.bak.$(date -u +%Y%m%d%H%M%S)"
+  if [ -f "$role_bin_path" ] && [ ! -L "$role_bin_path" ] &&
+     [ -x "$role_bin_path" ] && [ "$(sha256_file "$role_bin_path")" = "$(sha256_file "$bin_path")" ]; then
+    log "AgentWeb ${role}: verified role binary already present; retaining it"
+  else
+    role_bin_incoming="${role_bin_path}.incoming.$$"
+    cp "$bin_path" "$role_bin_incoming"
+    chmod 0755 "$role_bin_incoming"
+    if [ -x "$role_bin_path" ]; then
+      cp -p "$role_bin_path" "${role_bin_path}.bak.$(date -u +%Y%m%d%H%M%S)"
+    fi
+    mv -f "$role_bin_incoming" "$role_bin_path"
   fi
-  mv -f "$role_bin_incoming" "$role_bin_path"
   if [ ! -s "${role_dir}/node-id" ]; then
     new_runtime_id lgw >"${role_dir}/node-id"
   fi
